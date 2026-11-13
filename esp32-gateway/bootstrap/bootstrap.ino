@@ -8,6 +8,8 @@
  * Serial commands at 115200:
  *   WIFI|SSID|PASSWORD
  *   ENROLL|BACKEND_URL|ENROLLMENT_ID|BOOTSTRAP_TOKEN
+ *   RESET_WIFI
+ *   STATUS
  */
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -35,6 +37,14 @@ void saveEnrollment(const String& command) {
   preferences.putString("enrollmentId", command.substring(first + 1, second));
   preferences.putString("bootstrapToken", command.substring(second + 1));
   Serial.println("ENROLLMENT_SAVED_RESTART_REQUIRED");
+}
+
+void resetWifi() {
+  preferences.remove("wifiSsid");
+  preferences.remove("wifiPassword");
+  Serial.println("WIFI_RESET_OK_RESTARTING");
+  delay(300);
+  ESP.restart();
 }
 
 bool handshake() {
@@ -83,6 +93,7 @@ void loop() {
     if (character == '\n' || character == '\r') {
       if (serialLine.startsWith("WIFI|")) saveWifi(serialLine);
       else if (serialLine.startsWith("ENROLL|")) saveEnrollment(serialLine);
+      else if (serialLine == "RESET_WIFI") resetWifi();
       else if (serialLine == "STATUS") Serial.printf("MAC=%s CHIP=%s\n", WiFi.macAddress().c_str(), chipId().c_str());
       serialLine = "";
     } else serialLine += character;
