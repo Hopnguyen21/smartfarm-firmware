@@ -35,10 +35,19 @@ jobs:
       - name: Rename artifacts
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
-          cp build/bootstrap/*.bin dist/smartfarm-gateway-bootstrap-${GITHUB_REF_NAME}.bin
-          cp build/ota/*.bin dist/smartfarm-gateway-ota-${GITHUB_REF_NAME}.bin
-          cp build/node/*.hex dist/smartfarm-node-nano-${GITHUB_REF_NAME}.hex
+          bootstrap_bin="$(find build/bootstrap -maxdepth 1 -type f -name '*.ino.bin' -print -quit)"
+          ota_bin="$(find build/ota -maxdepth 1 -type f -name '*.ino.bin' -print -quit)"
+          node_hex="$(find build/node -maxdepth 1 -type f -name '*.hex' -print -quit)"
+          test -n "$bootstrap_bin"
+          test -n "$ota_bin"
+          test -n "$node_hex"
+          cp "$bootstrap_bin" "dist/smartfarm-gateway-bootstrap-${GITHUB_REF_NAME}.bin"
+          cp "$ota_bin" "dist/smartfarm-gateway-ota-${GITHUB_REF_NAME}.bin"
+          cp "$node_hex" "dist/smartfarm-node-nano-${GITHUB_REF_NAME}.hex"
+          (cd build/bootstrap && zip -q -r "../../dist/smartfarm-gateway-bootstrap-package-${GITHUB_REF_NAME}.zip" .)
+          (cd build/ota && zip -q -r "../../dist/smartfarm-gateway-ota-package-${GITHUB_REF_NAME}.zip" .)
       - name: Generate checksums
         run: sha256sum dist/* | tee dist/SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
