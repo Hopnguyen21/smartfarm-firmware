@@ -71,6 +71,7 @@ bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
     return false;
   }
   HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   if (!http.begin(firmwareUrl)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN"); return false; }
   const int status = http.GET();
   if (status != HTTP_CODE_OK) { Serial.printf("OTA_DOWNLOAD_FAILED status=%d\n", status); http.end(); return false; }
@@ -92,6 +93,7 @@ bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
     Serial.println("OTA_SHA256_MISMATCH");
     return false;
   }
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   if (!http.begin(firmwareUrl)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN_WRITE"); return false; }
   const int writeStatus = http.GET();
   if (writeStatus != HTTP_CODE_OK || !Update.begin(UPDATE_SIZE_UNKNOWN)) { Serial.printf("OTA_WRITE_FAILED status=%d\n", writeStatus); http.end(); return false; }

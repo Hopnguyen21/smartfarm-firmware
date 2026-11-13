@@ -72,17 +72,18 @@ void autoEnroll() {
 }
 
 bool applyRuntimeUpdate(const String& url, const String& expected) {
-  HTTPClient http; if (!http.begin(url)) return false;
+  HTTPClient http; http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); if (!http.begin(url)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN"); return false; }
   const int code = http.GET(); if (code != HTTP_CODE_OK) { http.end(); return false; }
   WiFiClient* stream = http.getStreamPtr(); mbedtls_sha256_context hash; mbedtls_sha256_init(&hash); mbedtls_sha256_starts(&hash, 0);
   uint8_t buffer[1024]; size_t total = 0; unsigned long last = millis();
   while (http.connected() && (millis() - last < 15000)) { size_t available = stream->available(); if (!available) { delay(10); continue; } size_t read = stream->readBytes(buffer, min(available, sizeof(buffer))); if (!read) continue; mbedtls_sha256_update(&hash, buffer, read); total += read; last = millis(); }
   uint8_t digest[32]; mbedtls_sha256_finish(&hash, digest); mbedtls_sha256_free(&hash); http.end(); String actual; for (uint8_t b : digest) { if (b < 16) actual += '0'; actual += String(b, HEX); } actual.toUpperCase();
   if (!actual.equalsIgnoreCase(expected) || total == 0) { Serial.println("OTA_SHA256_MISMATCH"); return false; }
-  if (!http.begin(url) || http.GET() != HTTP_CODE_OK) { http.end(); return false; }
-  if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { http.end(); return false; }
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); if (!http.begin(url) || http.GET() != HTTP_CODE_OK) { Serial.println("OTA_DOWNLOAD_FAILED:WRITE"); http.end(); return false; }
+  if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { Serial.println("OTA_WRITE_FAILED:BEGIN"); http.end(); return false; }
   size_t written = Update.writeStream(*http.getStreamPtr()); bool ok = written > 0 && Update.end(true); http.end();
   if (ok) { Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
+  else Serial.println("OTA_WRITE_FAILED:END");
   return ok;
 }
 
