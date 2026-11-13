@@ -1,0 +1,47 @@
+name: Build SmartFarm Firmware Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install cores and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32 arduino:avr
+          arduino-cli lib install PubSubClient ArduinoJson
+      - name: Compile ESP32 bootstrap
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32c3 \
+            --output-dir build/bootstrap esp32-gateway/bootstrap
+      - name: Compile ESP32 OTA runtime
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32c3 \
+            --output-dir build/ota esp32-gateway/ota
+      - name: Compile Arduino Nano Node
+        run: |
+          arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old \
+            --output-dir build/node arduino-nano-node
+      - name: Rename artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/bootstrap/*.bin dist/smartfarm-gateway-bootstrap-${GITHUB_REF_NAME}.bin
+          cp build/ota/*.bin dist/smartfarm-gateway-ota-${GITHUB_REF_NAME}.bin
+          cp build/node/*.hex dist/smartfarm-node-nano-${GITHUB_REF_NAME}.hex
+      - name: Generate checksums
+        run: sha256sum dist/* | tee dist/SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

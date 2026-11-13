@@ -1,0 +1,8 @@
+build/
+dist/
+.arduino15/
+*.bin
+*.hex
+*.elf
+*.map
+*.ini
