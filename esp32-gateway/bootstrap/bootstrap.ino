@@ -66,22 +66,22 @@ void startProvisioningPortal() {
   String apName = "SMARTFARM-" + chipId().substring(8);
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(apName.c_str());
-  provisioningServer.on("/", HTTP_GET, []() { provisioningServer.send(200, "text/html", provisioningPage()); });
+  provisioningServer.on("/", HTTP_GET, []() { provisioningServer.send(200, "text/html; charset=utf-8", provisioningPage()); });
   provisioningServer.on("/save", HTTP_POST, []() {
     if (!provisioningServer.hasArg("ssid")) {
-      provisioningServer.send(400, "text/html", provisioningPage("Thiếu thông tin bắt buộc."));
+      provisioningServer.send(400, "text/html; charset=utf-8", provisioningPage("Thiếu thông tin bắt buộc."));
       return;
     }
     preferences.putString("wifiSsid", provisioningServer.arg("ssid"));
     preferences.putString("wifiPassword", provisioningServer.arg("password"));
-    provisioningServer.send(200, "text/html", provisioningPage("Đã lưu Wi-Fi. ESP32 sẽ khởi động lại."));
+    provisioningServer.send(200, "text/html; charset=utf-8", provisioningPage("Đã lưu Wi-Fi. ESP32 sẽ khởi động lại."));
     delay(800);
     ESP.restart();
   });
   provisioningServer.on("/enroll", HTTP_POST, []() {
-    if (WiFi.status() != WL_CONNECTED) { provisioningServer.send(409, "text/html", provisioningPage("ESP32 chưa kết nối Wi-Fi.")); return; }
+    if (WiFi.status() != WL_CONNECTED) { provisioningServer.send(409, "text/html; charset=utf-8", provisioningPage("ESP32 chưa kết nối Wi-Fi.")); return; }
     HTTPClient http;
-    if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-enrollment/auto")) { provisioningServer.send(500, "text/html", provisioningPage("Không mở được Backend.")); return; }
+    if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-enrollment/auto")) { provisioningServer.send(500, "text/html; charset=utf-8", provisioningPage("Không mở được Backend.")); return; }
     http.addHeader("Content-Type", "application/json");
     StaticJsonDocument<384> document;
     document["macAddress"] = WiFi.macAddress();
@@ -90,9 +90,9 @@ void startProvisioningPortal() {
     String payload; serializeJson(document, payload);
     const int status = http.POST(payload);
     http.end();
-    if (status < 200 || status >= 300) { provisioningServer.send(502, "text/html", provisioningPage("Enrollment thất bại. Kiểm tra thiết bị đã được cấp phát.")); return; }
+    if (status < 200 || status >= 300) { provisioningServer.send(502, "text/html; charset=utf-8", provisioningPage("Enrollment thất bại. Kiểm tra thiết bị đã được cấp phát.")); return; }
     preferences.putBool("enrolled", true);
-    provisioningServer.send(200, "text/html", provisioningPage("Enrollment thành công. Có thể đóng trang này."));
+    provisioningServer.send(200, "text/html; charset=utf-8", provisioningPage("Enrollment thành công. Có thể đóng trang này."));
     return;
   });
   provisioningServer.begin();
