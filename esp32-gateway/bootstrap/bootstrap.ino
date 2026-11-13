@@ -9,6 +9,7 @@
  *   WIFI|SSID|PASSWORD
  *   ENROLL|BACKEND_URL|ENROLLMENT_ID|BOOTSTRAP_TOKEN
  *   RESET_WIFI
+ *   RESET_ENROLLMENT
  *   STATUS
  */
 #include <WiFi.h>
@@ -51,6 +52,19 @@ void resetWifi() {
   preferences.remove("wifiSsid");
   preferences.remove("wifiPassword");
   Serial.println("WIFI_RESET_OK_RESTARTING");
+  delay(300);
+  ESP.restart();
+}
+
+void resetEnrollment() {
+  preferences.remove("wifiSsid");
+  preferences.remove("wifiPassword");
+  preferences.remove("enrolled");
+  preferences.remove("otaArmed");
+  preferences.remove("backendUrl");
+  preferences.remove("enrollmentId");
+  preferences.remove("bootstrapToken");
+  Serial.println("ENROLLMENT_RESET_OK_RESTARTING");
   delay(300);
   ESP.restart();
 }
@@ -194,6 +208,7 @@ void loop() {
       if (serialLine.startsWith("WIFI|")) saveWifi(serialLine);
       else if (serialLine.startsWith("ENROLL|")) saveEnrollment(serialLine);
       else if (serialLine == "RESET_WIFI") resetWifi();
+      else if (serialLine == "RESET_ENROLLMENT") resetEnrollment();
       else if (serialLine == "START_ENROLL") autoEnroll();
       else if (serialLine == "STATUS") Serial.printf("MAC=%s CHIP=%s\n", WiFi.macAddress().c_str(), chipId().c_str());
       serialLine = "";
