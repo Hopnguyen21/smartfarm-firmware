@@ -67,7 +67,7 @@ void autoEnroll() {
   String payload; serializeJson(document, payload);
   const int status = http.POST(payload);
   http.end();
-  if (status >= 200 && status < 300) { preferences.putBool("enrolled", true); Serial.println("ENROLLMENT_OK"); }
+  if (status >= 200 && status < 300) { preferences.putBool("enrolled", true); preferences.putBool("otaArmed", true); Serial.println("ENROLLMENT_OK"); }
   else { Serial.print("ENROLLMENT_FAILED status="); Serial.println(status); }
 }
 
@@ -87,12 +87,12 @@ bool applyRuntimeUpdate(const String& url, const String& expected) {
   const bool ok = written == (size_t)contentLength && ended && Update.isFinished();
   if (!ok) { Serial.print("OTA_WRITE_FAILED:END written="); Serial.print(written); Serial.print(" expected="); Serial.print(contentLength); Serial.print(" error="); Serial.println(Update.errorString()); }
   http.end();
-  if (ok) { Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
+  if (ok) { preferences.putBool("otaArmed", false); Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
   return ok;
 }
 
 void pollRuntimeUpdate() {
-  if (WiFi.status() != WL_CONNECTED || !preferences.getBool("enrolled", false) || millis() - lastUpdatePoll < 10000) return;
+  if (WiFi.status() != WL_CONNECTED || !preferences.getBool("enrolled", false) || !preferences.getBool("otaArmed", false) || millis() - lastUpdatePoll < 10000) return;
   lastUpdatePoll = millis(); HTTPClient http; String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/update?macAddress=" + WiFi.macAddress() + "&currentVersion=bootstrap"; if (!http.begin(url)) return; int code = http.GET(); if (code == HTTP_CODE_OK) { StaticJsonDocument<768> doc; if (!deserializeJson(doc, http.getString())) { Serial.println("OTA_JOB_RECEIVED"); String firmwareUrl = doc["firmwareUrl"] | ""; String sha = doc["artifactSha256"] | ""; http.end(); applyRuntimeUpdate(firmwareUrl, sha); return; } } http.end();
 }
 
@@ -136,6 +136,7 @@ void startProvisioningPortal() {
     http.end();
     if (status < 200 || status >= 300) { provisioningServer.send(502, "text/html; charset=utf-8", provisioningPage("Enrollment thất bại. Kiểm tra thiết bị đã được cấp phát.")); return; }
     preferences.putBool("enrolled", true);
+    preferences.putBool("otaArmed", true);
     provisioningServer.send(200, "text/html; charset=utf-8", provisioningPage("Enrollment thành công. Có thể đóng trang này."));
     return;
   });
