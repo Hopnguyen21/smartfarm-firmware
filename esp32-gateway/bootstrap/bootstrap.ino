@@ -15,9 +15,12 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <WebServer.h>
 
 Preferences preferences;
 String serialLine;
+WebServer provisioningServer(80);
+bool provisioningMode = false;
 
 String chipId() { return String((uint32_t)ESP.getEfuseMac(), HEX); }
 
@@ -47,6 +50,40 @@ void resetWifi() {
   ESP.restart();
 }
 
+String provisioningPage(const String& message = "") {
+  String html = F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>SmartFarm Provisioning</title><style>body{font-family:Arial;max-width:520px;margin:30px auto;padding:0 16px;background:#f4f7f6;color:#17211d}input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0 14px;border:1px solid #bbb;border-radius:6px}button{padding:12px 18px;background:#079669;color:white;border:0;border-radius:6px;font-weight:bold}small{color:#667}</style></head><body><h2>SmartFarm Gateway Setup</h2><p>Nhập cấu hình cho ESP32 Gateway. Thiết bị sẽ khởi động lại sau khi lưu.</p>");
+  if (!message.isEmpty()) { html += "<p><b>" + message + "</b></p>"; }
+  html += F("<form method='post' action='/save'><label>Wi-Fi SSID</label><input name='ssid' required><label>Wi-Fi Password</label><input name='password' type='password'><label>Backend URL</label><input name='backend' placeholder='https://api.example.com' required><label>Enrollment ID</label><input name='enrollment' required><label>Bootstrap Token</label><input name='token' type='password' required><button type='submit'>Lưu và khởi động lại</button></form><p><small>MAC: ");
+  html += WiFi.macAddress();
+  html += F("</small></p></body></html>");
+  return html;
+}
+
+void startProvisioningPortal() {
+  provisioningMode = true;
+  String apName = "SMARTFARM-" + chipId().substring(8);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apName.c_str());
+  provisioningServer.on("/", HTTP_GET, []() { provisioningServer.send(200, "text/html", provisioningPage()); });
+  provisioningServer.on("/save", HTTP_POST, []() {
+    if (!provisioningServer.hasArg("ssid") || !provisioningServer.hasArg("backend") || !provisioningServer.hasArg("enrollment") || !provisioningServer.hasArg("token")) {
+      provisioningServer.send(400, "text/html", provisioningPage("Thiếu thông tin bắt buộc."));
+      return;
+    }
+    preferences.putString("wifiSsid", provisioningServer.arg("ssid"));
+    preferences.putString("wifiPassword", provisioningServer.arg("password"));
+    preferences.putString("backendUrl", provisioningServer.arg("backend"));
+    preferences.putString("enrollmentId", provisioningServer.arg("enrollment"));
+    preferences.putString("bootstrapToken", provisioningServer.arg("token"));
+    provisioningServer.send(200, "text/html", provisioningPage("Đã lưu. ESP32 sẽ khởi động lại."));
+    delay(800);
+    ESP.restart();
+  });
+  provisioningServer.begin();
+  Serial.print("PROVISIONING_AP="); Serial.println(apName);
+  Serial.println("PROVISIONING_URL=http://192.168.4.1");
+}
+
 bool handshake() {
   const String backend = preferences.getString("backendUrl", "");
   const String enrollment = preferences.getString("enrollmentId", "");
@@ -71,12 +108,13 @@ bool handshake() {
 void connectWifi() {
   const String ssid = preferences.getString("wifiSsid", "");
   const String password = preferences.getString("wifiPassword", "");
-  if (ssid.isEmpty()) { Serial.println("WIFI_CONFIG_REQUIRED"); return; }
+  if (ssid.isEmpty()) { Serial.println("WIFI_CONFIG_REQUIRED"); startProvisioningPortal(); return; }
   WiFi.begin(ssid.c_str(), password.c_str());
   const unsigned long started = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - started < 20000) { delay(500); Serial.print('.'); }
   Serial.println();
   Serial.println(WiFi.status() == WL_CONNECTED ? "WIFI_CONNECTED" : "WIFI_FAILED");
+  if (WiFi.status() != WL_CONNECTED) startProvisioningPortal();
   if (WiFi.status() == WL_CONNECTED) handshake();
 }
 
@@ -88,6 +126,7 @@ void setup() {
 }
 
 void loop() {
+  if (provisioningMode) provisioningServer.handleClient();
   while (Serial.available()) {
     const char character = (char)Serial.read();
     if (character == '\n' || character == '\r') {
