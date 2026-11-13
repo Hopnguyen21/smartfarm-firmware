@@ -19,6 +19,11 @@
 #include <mbedtls/sha256.h>
 #include <vector>
 #include <time.h>
+#ifdef SMARTFARM_FIRMWARE_VERSION
+static const char* FIRMWARE_VERSION = SMARTFARM_FIRMWARE_VERSION;
+#else
+static const char* FIRMWARE_VERSION = "dev";
+#endif
 // E32 wiring kept compatible with the original C3 firmware.
 static const uint8_t LORA_NETWORK_ID = 0x11;
 static const uint8_t LORA_CHANNEL = 0x1A;
@@ -30,7 +35,6 @@ static const int PIN_E32_M1 = 5;
 // Allow enough time for the E32 air-rate and the UNO node sensor loop.
 static const unsigned long NODE_REPLY_TIMEOUT_MS = 5000;
 static const unsigned long SENSOR_POLL_INTERVAL_MS = 8000;
-static const char* FIRMWARE_VERSION = "1.0.10";
 static const char* BACKEND_URL = "http://192.168.1.159:5144";
 // Temporary recovery mode: use the known-good deployment config without
 // requiring CONFIG=... to be pasted through Serial Monitor.

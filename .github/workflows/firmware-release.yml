@@ -21,6 +21,10 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32 arduino:avr
           arduino-cli lib install PubSubClient ArduinoJson "DHT sensor library" "Adafruit Unified Sensor"
+      - name: Inject release version into runtime firmware
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          printf '#define SMARTFARM_FIRMWARE_VERSION "%s"\n' "$VERSION" > esp32-gateway/ota/version.h
       - name: Compile ESP32 bootstrap
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
