@@ -19,7 +19,7 @@ jobs:
           arduino-cli config init
           arduino-cli core update-index
           arduino-cli core install esp32:esp32 arduino:avr
-          arduino-cli lib install PubSubClient ArduinoJson
+          arduino-cli lib install PubSubClient ArduinoJson "DHT sensor library" "Adafruit Unified Sensor"
       - name: Compile ESP32 bootstrap
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
