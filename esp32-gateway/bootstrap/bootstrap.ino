@@ -21,7 +21,8 @@ Preferences preferences;
 String serialLine;
 WebServer provisioningServer(80);
 bool provisioningMode = false;
-const char* BACKEND_URL = "http://192.168.1.100:5144";
+// Backend address on the SmartFarm Wi-Fi LAN. Change only when deploying to another LAN.
+const char* BACKEND_URL = "http://192.168.1.159:5144";
 
 String chipId() { return String((uint32_t)ESP.getEfuseMac(), HEX); }
 
