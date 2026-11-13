@@ -15,6 +15,8 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <mbedtls/sha256.h>
 #include <vector>
 #include <time.h>
 // E32 wiring kept compatible with the original C3 firmware.
@@ -28,6 +30,8 @@ static const int PIN_E32_M1 = 5;
 // Allow enough time for the E32 air-rate and the UNO node sensor loop.
 static const unsigned long NODE_REPLY_TIMEOUT_MS = 5000;
 static const unsigned long SENSOR_POLL_INTERVAL_MS = 8000;
+static const char* FIRMWARE_VERSION = "1.0.10";
+static const char* BACKEND_URL = "http://192.168.1.159:5144";
 // Temporary recovery mode: use the known-good deployment config without
 // requiring CONFIG=... to be pasted through Serial Monitor.
 static const bool USE_COMPILED_CONFIG = false;
@@ -53,8 +57,65 @@ HardwareSerial e32Serial(1);
 String serialLine;
 unsigned long lastPublish = 0;
 unsigned long lastMqttAttempt = 0;
+unsigned long lastOtaPoll = 0;
 uint8_t currentNodeIndex = 0;
 bool enrollmentHandshakeVerified = false;
+
+bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
+  if (firmwareUrl.isEmpty() || expectedSha256.length() != 64) {
+    Serial.println("OTA_REJECTED:INVALID_METADATA");
+    return false;
+  }
+  HTTPClient http;
+  if (!http.begin(firmwareUrl)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN"); return false; }
+  const int status = http.GET();
+  if (status != HTTP_CODE_OK) { Serial.printf("OTA_DOWNLOAD_FAILED status=%d\n", status); http.end(); return false; }
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha); mbedtls_sha256_starts(&sha, 0);
+  uint8_t buffer[1024]; size_t total = 0;
+  WiFiClient* stream = http.getStreamPtr();
+  while (http.connected() && (stream->available() || total == 0)) {
+    const int available = stream->available();
+    if (available <= 0) { delay(1); continue; }
+    const size_t readCount = stream->readBytes(buffer, min((int)sizeof(buffer), available));
+    if (!readCount) break;
+    mbedtls_sha256_update(&sha, buffer, readCount); total += readCount;
+  }
+  uint8_t digest[32]; mbedtls_sha256_finish(&sha, digest); mbedtls_sha256_free(&sha); http.end();
+  String actual; actual.reserve(64);
+  for (uint8_t b : digest) { if (b < 16) actual += '0'; actual += String(b, HEX); }
+  if (!total || !actual.equalsIgnoreCase(expectedSha256)) {
+    Serial.println("OTA_SHA256_MISMATCH");
+    return false;
+  }
+  if (!http.begin(firmwareUrl)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN_WRITE"); return false; }
+  const int writeStatus = http.GET();
+  if (writeStatus != HTTP_CODE_OK || !Update.begin(UPDATE_SIZE_UNKNOWN)) { Serial.printf("OTA_WRITE_FAILED status=%d\n", writeStatus); http.end(); return false; }
+  size_t written = Update.writeStream(*http.getStreamPtr());
+  const bool ok = written > 0 && Update.end(true) && Update.isFinished();
+  http.end();
+  if (!ok) { Serial.println("OTA_WRITE_FAILED:VERIFY"); return false; }
+  Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); return true;
+}
+
+void pollRuntimeUpdate() {
+  if (WiFi.status() != WL_CONNECTED || millis() - lastOtaPoll < 10000) return;
+  lastOtaPoll = millis();
+  HTTPClient http;
+  String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/update?macAddress=" + WiFi.macAddress() + "&currentVersion=" + FIRMWARE_VERSION;
+  if (!http.begin(url)) return;
+  const int status = http.GET();
+  if (status == HTTP_CODE_OK) {
+    StaticJsonDocument<768> doc;
+    if (!deserializeJson(doc, http.getString())) {
+      const String firmwareUrl = doc["firmwareUrl"] | "";
+      const String sha = doc["artifactSha256"] | "";
+      Serial.println("OTA_JOB_RECEIVED");
+      http.end(); applyOtaUpdate(firmwareUrl, sha); return;
+    }
+  }
+  http.end();
+}
 uint16_t calculateCRC16(const uint8_t* data, size_t length) {
   uint16_t crc = 0xFFFF;
   for (size_t i = 0; i < length; i++) {
@@ -465,6 +526,7 @@ void loop() {
     connectMqtt();
   }
   mqtt.loop();
+  pollRuntimeUpdate();
   const unsigned long pollIntervalMs = (unsigned long)max(1, config.pollingIntervalSeconds) * 1000UL;
   if (millis() - lastPublish > pollIntervalMs && !config.nodes.empty()) {
     lastPublish = millis();
