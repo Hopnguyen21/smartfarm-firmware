@@ -65,20 +65,19 @@ unsigned long lastOtaPoll = 0;
 uint8_t currentNodeIndex = 0;
 bool enrollmentHandshakeVerified = false;
 
-void reportPendingOta() {
-  String version = prefs.getString("pendingRuntimeVersion", "");
-  if (version.isEmpty() || WiFi.status() != WL_CONNECTED) return;
+void reportRuntimeBoot() {
+  if (WiFi.status() != WL_CONNECTED || String(FIRMWARE_VERSION) == "dev") return;
   HTTPClient http;
   if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-runtime/ota-result")) return;
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<256> doc;
   doc["macAddress"] = WiFi.macAddress();
-  doc["version"] = version;
+  doc["version"] = FIRMWARE_VERSION;
   doc["result"] = "Succeeded";
   String payload; serializeJson(doc, payload);
   const int status = http.POST(payload);
   http.end();
-  if (status >= 200 && status < 300) { prefs.remove("pendingRuntimeVersion"); Serial.println("OTA_RESULT_REPORTED"); }
+  if (status >= 200 && status < 300) Serial.println("OTA_RESULT_REPORTED");
   else Serial.printf("OTA_RESULT_REPORT_FAILED status=%d\n", status);
 }
 
@@ -489,6 +488,7 @@ void pollNode(const NodeRoute& node) {
 void setup() {
   Serial.setRxBufferSize(4096);
   Serial.begin(115200); delay(500); prefs.begin("smartfarm", false);
+  Serial.print("RUNTIME_STARTED version="); Serial.println(FIRMWARE_VERSION);
   pinMode(PIN_E32_M0, OUTPUT);
   pinMode(PIN_E32_M1, OUTPUT);
   digitalWrite(PIN_E32_M0, LOW);
@@ -503,7 +503,7 @@ void setup() {
     Serial.println("NTP_SYNC_REQUESTED");
     verifyEnrollmentHandshake();
   }
-  reportPendingOta();
+  reportRuntimeBoot();
   connectMqtt();
 }
 void loop() {
