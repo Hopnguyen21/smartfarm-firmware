@@ -5,6 +5,7 @@
  * Open Serial Monitor at 115200 baud and record MAC_ADDRESS and CHIP_ID.
  */
 #include <WiFi.h>
+#include "esp_mac.h"
 
 String chipId() {
   char value[17];
@@ -13,9 +14,16 @@ String chipId() {
 }
 
 void printIdentity() {
+  uint8_t mac[6] = {};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
   Serial.println("--- SmartFarm ESP32 identity ---");
   Serial.print("MAC_ADDRESS=");
-  Serial.println(WiFi.macAddress());
+  for (uint8_t i = 0; i < 6; i++) {
+    if (i > 0) Serial.print(':');
+    if (mac[i] < 0x10) Serial.print('0');
+    Serial.print(mac[i], HEX);
+  }
+  Serial.println();
   Serial.print("CHIP_ID=");
   Serial.println(chipId());
   Serial.print("CHIP_MODEL=");
