@@ -27,6 +27,7 @@ bool provisioningMode = false;
 unsigned long lastUpdatePoll = 0;
 // Backend address on the SmartFarm Wi-Fi LAN. Change only when deploying to another LAN.
 const char* BACKEND_URL = "http://192.168.1.159:5144";
+const char* BOOTSTRAP_FIRMWARE_VERSION = "1.0.16";
 
 String chipId() { return String((uint32_t)ESP.getEfuseMac(), HEX); }
 
@@ -77,7 +78,7 @@ void autoEnroll() {
   StaticJsonDocument<384> document;
   document["macAddress"] = WiFi.macAddress();
   document["chipId"] = chipId();
-  document["bootstrapFirmwareVersion"] = "1.0.8";
+  document["bootstrapFirmwareVersion"] = BOOTSTRAP_FIRMWARE_VERSION;
   String payload; serializeJson(document, payload);
   const int status = http.POST(payload);
   http.end();
@@ -85,7 +86,7 @@ void autoEnroll() {
   else { Serial.print("ENROLLMENT_FAILED status="); Serial.println(status); }
 }
 
-bool applyRuntimeUpdate(const String& url, const String& expected) {
+bool applyRuntimeUpdate(const String& url, const String& expected, const String& version) {
   HTTPClient http; http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); if (!http.begin(url)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN"); return false; }
   const int code = http.GET(); if (code != HTTP_CODE_OK) { http.end(); return false; }
   WiFiClient* stream = http.getStreamPtr(); mbedtls_sha256_context hash; mbedtls_sha256_init(&hash); mbedtls_sha256_starts(&hash, 0);
@@ -101,13 +102,13 @@ bool applyRuntimeUpdate(const String& url, const String& expected) {
   const bool ok = written == (size_t)contentLength && ended && Update.isFinished();
   if (!ok) { Serial.print("OTA_WRITE_FAILED:END written="); Serial.print(written); Serial.print(" expected="); Serial.print(contentLength); Serial.print(" error="); Serial.println(Update.errorString()); }
   http.end();
-  if (ok) { preferences.putBool("otaArmed", false); Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
+  if (ok) { preferences.putString("pendingRuntimeVersion", version); preferences.putBool("otaArmed", false); Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
   return ok;
 }
 
 void pollRuntimeUpdate() {
   if (WiFi.status() != WL_CONNECTED || !preferences.getBool("enrolled", false) || !preferences.getBool("otaArmed", false) || millis() - lastUpdatePoll < 10000) return;
-  lastUpdatePoll = millis(); HTTPClient http; String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/update?macAddress=" + WiFi.macAddress() + "&currentVersion=bootstrap"; if (!http.begin(url)) return; int code = http.GET(); if (code == HTTP_CODE_OK) { StaticJsonDocument<768> doc; if (!deserializeJson(doc, http.getString())) { Serial.println("OTA_JOB_RECEIVED"); String firmwareUrl = doc["firmwareUrl"] | ""; String sha = doc["artifactSha256"] | ""; http.end(); applyRuntimeUpdate(firmwareUrl, sha); return; } } http.end();
+  lastUpdatePoll = millis(); HTTPClient http; String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/update?macAddress=" + WiFi.macAddress() + "&currentVersion=bootstrap"; if (!http.begin(url)) return; int code = http.GET(); if (code == HTTP_CODE_OK) { StaticJsonDocument<768> doc; if (!deserializeJson(doc, http.getString())) { Serial.println("OTA_JOB_RECEIVED"); String firmwareUrl = doc["firmwareUrl"] | ""; String sha = doc["artifactSha256"] | ""; String version = doc["version"] | ""; http.end(); applyRuntimeUpdate(firmwareUrl, sha, version); return; } } http.end();
 }
 
 String provisioningPage(const String& message = "") {
@@ -144,7 +145,7 @@ void startProvisioningPortal() {
     StaticJsonDocument<384> document;
     document["macAddress"] = WiFi.macAddress();
     document["chipId"] = chipId();
-    document["bootstrapFirmwareVersion"] = "1.0.3";
+    document["bootstrapFirmwareVersion"] = BOOTSTRAP_FIRMWARE_VERSION;
     String payload; serializeJson(document, payload);
     const int status = http.POST(payload);
     http.end();

@@ -65,6 +65,23 @@ unsigned long lastOtaPoll = 0;
 uint8_t currentNodeIndex = 0;
 bool enrollmentHandshakeVerified = false;
 
+void reportPendingOta() {
+  String version = prefs.getString("pendingRuntimeVersion", "");
+  if (version.isEmpty() || WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-runtime/ota-result")) return;
+  http.addHeader("Content-Type", "application/json");
+  StaticJsonDocument<256> doc;
+  doc["macAddress"] = WiFi.macAddress();
+  doc["version"] = version;
+  doc["result"] = "Succeeded";
+  String payload; serializeJson(doc, payload);
+  const int status = http.POST(payload);
+  http.end();
+  if (status >= 200 && status < 300) { prefs.remove("pendingRuntimeVersion"); Serial.println("OTA_RESULT_REPORTED"); }
+  else Serial.printf("OTA_RESULT_REPORT_FAILED status=%d\n", status);
+}
+
 bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
   if (firmwareUrl.isEmpty() || expectedSha256.length() != 64) {
     Serial.println("OTA_REJECTED:INVALID_METADATA");
@@ -486,6 +503,7 @@ void setup() {
     Serial.println("NTP_SYNC_REQUESTED");
     verifyEnrollmentHandshake();
   }
+  reportPendingOta();
   connectMqtt();
 }
 void loop() {
