@@ -96,9 +96,11 @@ bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   if (!http.begin(firmwareUrl)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN_WRITE"); return false; }
   const int writeStatus = http.GET();
-  if (writeStatus != HTTP_CODE_OK || !Update.begin(UPDATE_SIZE_UNKNOWN)) { Serial.printf("OTA_WRITE_FAILED status=%d\n", writeStatus); http.end(); return false; }
+  const int contentLength = http.getSize();
+  if (writeStatus != HTTP_CODE_OK || contentLength <= 0 || !Update.begin((size_t)contentLength)) { Serial.printf("OTA_WRITE_FAILED status=%d size=%d error=%s\n", writeStatus, contentLength, Update.errorString()); http.end(); return false; }
   size_t written = Update.writeStream(*http.getStreamPtr());
-  const bool ok = written > 0 && Update.end(true) && Update.isFinished();
+  const bool ok = written == (size_t)contentLength && Update.end(true) && Update.isFinished();
+  if (!ok) Serial.printf("OTA_WRITE_FAILED written=%u expected=%d error=%s\n", (unsigned)written, contentLength, Update.errorString());
   http.end();
   if (!ok) { Serial.println("OTA_WRITE_FAILED:VERIFY"); return false; }
   Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); return true;

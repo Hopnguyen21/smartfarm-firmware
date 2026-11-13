@@ -80,10 +80,14 @@ bool applyRuntimeUpdate(const String& url, const String& expected) {
   uint8_t digest[32]; mbedtls_sha256_finish(&hash, digest); mbedtls_sha256_free(&hash); http.end(); String actual; for (uint8_t b : digest) { if (b < 16) actual += '0'; actual += String(b, HEX); } actual.toUpperCase();
   if (!actual.equalsIgnoreCase(expected) || total == 0) { Serial.println("OTA_SHA256_MISMATCH"); return false; }
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); if (!http.begin(url) || http.GET() != HTTP_CODE_OK) { Serial.println("OTA_DOWNLOAD_FAILED:WRITE"); http.end(); return false; }
-  if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { Serial.println("OTA_WRITE_FAILED:BEGIN"); http.end(); return false; }
-  size_t written = Update.writeStream(*http.getStreamPtr()); bool ok = written > 0 && Update.end(true); http.end();
+  const int contentLength = http.getSize();
+  if (contentLength <= 0 || !Update.begin((size_t)contentLength)) { Serial.print("OTA_WRITE_FAILED:BEGIN error="); Serial.println(Update.errorString()); http.end(); return false; }
+  size_t written = Update.writeStream(*http.getStreamPtr());
+  const bool ended = Update.end(true);
+  const bool ok = written == (size_t)contentLength && ended && Update.isFinished();
+  if (!ok) { Serial.print("OTA_WRITE_FAILED:END written="); Serial.print(written); Serial.print(" expected="); Serial.print(contentLength); Serial.print(" error="); Serial.println(Update.errorString()); }
+  http.end();
   if (ok) { Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
-  else Serial.println("OTA_WRITE_FAILED:END");
   return ok;
 }
 
