@@ -60,7 +60,7 @@ void autoEnroll() {
   StaticJsonDocument<384> document;
   document["macAddress"] = WiFi.macAddress();
   document["chipId"] = chipId();
-  document["bootstrapFirmwareVersion"] = "1.0.7";
+  document["bootstrapFirmwareVersion"] = "1.0.8";
   String payload; serializeJson(document, payload);
   const int status = http.POST(payload);
   http.end();
