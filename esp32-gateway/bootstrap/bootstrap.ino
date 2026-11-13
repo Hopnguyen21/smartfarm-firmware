@@ -52,6 +52,22 @@ void resetWifi() {
   ESP.restart();
 }
 
+void autoEnroll() {
+  if (WiFi.status() != WL_CONNECTED) { Serial.println("ENROLLMENT_REQUIRES_WIFI"); return; }
+  HTTPClient http;
+  if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-enrollment/auto")) { Serial.println("ENROLLMENT_BACKEND_UNAVAILABLE"); return; }
+  http.addHeader("Content-Type", "application/json");
+  StaticJsonDocument<384> document;
+  document["macAddress"] = WiFi.macAddress();
+  document["chipId"] = chipId();
+  document["bootstrapFirmwareVersion"] = "1.0.7";
+  String payload; serializeJson(document, payload);
+  const int status = http.POST(payload);
+  http.end();
+  if (status >= 200 && status < 300) Serial.println("ENROLLMENT_OK");
+  else { Serial.print("ENROLLMENT_FAILED status="); Serial.println(status); }
+}
+
 String provisioningPage(const String& message = "") {
   String html = F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>SmartFarm Provisioning</title><style>body{font-family:Arial;max-width:520px;margin:30px auto;padding:0 16px;background:#f4f7f6;color:#17211d}input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0 14px;border:1px solid #bbb;border-radius:6px}button{padding:12px 18px;background:#079669;color:white;border:0;border-radius:6px;font-weight:bold;margin:4px 0}small{color:#667}</style></head><body><h2>SmartFarm Gateway Setup</h2><p>Chỉ nhập Wi-Fi. Sau khi kết nối, bấm nút để bắt đầu Enrollment.</p>");
   if (!message.isEmpty()) { html += "<p><b>" + message + "</b></p>"; }
@@ -124,13 +140,13 @@ bool handshake() {
 void connectWifi() {
   const String ssid = preferences.getString("wifiSsid", "");
   const String password = preferences.getString("wifiPassword", "");
-  if (ssid.isEmpty()) { Serial.println("WIFI_CONFIG_REQUIRED"); startProvisioningPortal(); return; }
+  if (ssid.isEmpty()) { Serial.println("WIFI_CONFIG_REQUIRED"); return; }
   WiFi.begin(ssid.c_str(), password.c_str());
   const unsigned long started = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - started < 20000) { delay(500); Serial.print('.'); }
   Serial.println();
   Serial.println(WiFi.status() == WL_CONNECTED ? "WIFI_CONNECTED" : "WIFI_FAILED");
-  if (WiFi.status() != WL_CONNECTED || !preferences.getBool("enrolled", false)) startProvisioningPortal();
+  if (WiFi.status() != WL_CONNECTED) Serial.println("WIFI_CONFIG_REQUIRED_OR_FAILED");
 }
 
 void setup() {
@@ -148,6 +164,7 @@ void loop() {
       if (serialLine.startsWith("WIFI|")) saveWifi(serialLine);
       else if (serialLine.startsWith("ENROLL|")) saveEnrollment(serialLine);
       else if (serialLine == "RESET_WIFI") resetWifi();
+      else if (serialLine == "START_ENROLL") autoEnroll();
       else if (serialLine == "STATUS") Serial.printf("MAC=%s CHIP=%s\n", WiFi.macAddress().c_str(), chipId().c_str());
       serialLine = "";
     } else serialLine += character;
