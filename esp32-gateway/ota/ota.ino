@@ -19,6 +19,7 @@
 #include <mbedtls/sha256.h>
 #include <vector>
 #include <time.h>
+#include "version.h"
 #ifdef SMARTFARM_FIRMWARE_VERSION
 static const char* FIRMWARE_VERSION = SMARTFARM_FIRMWARE_VERSION;
 #else
