@@ -98,7 +98,10 @@ bool applyRuntimeUpdate(const String& url, const String& expected, const String&
   const int contentLength = http.getSize();
   if (contentLength <= 0 || !Update.begin((size_t)contentLength)) { Serial.print("OTA_WRITE_FAILED:BEGIN error="); Serial.println(Update.errorString()); http.end(); return false; }
   size_t written = Update.writeStream(*http.getStreamPtr());
-  const bool ended = Update.end(true);
+  // Never mark an image bootable when Update detected an internal write or
+  // validation error. The previous `true` value could reboot into a corrupt
+  // image after printing OTA_APPLIED.
+  const bool ended = Update.end(false);
   const bool ok = written == (size_t)contentLength && ended && Update.isFinished();
   if (!ok) { Serial.print("OTA_WRITE_FAILED:END written="); Serial.print(written); Serial.print(" expected="); Serial.print(contentLength); Serial.print(" error="); Serial.println(Update.errorString()); }
   http.end();
