@@ -48,6 +48,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # Arduino ESP32 images require boot_app0 at 0xE000 for the OTA
+          # bootloader state. Keep it in every downloadable package.
+          boot_app0="$(find "$HOME/.arduino15" -type f -path '*/tools/partitions/boot_app0.bin' -print -quit)"
+          test -n "$boot_app0"
+          cp "$boot_app0" build/bootstrap/boot_app0.bin
+          cp "$boot_app0" build/ota/boot_app0.bin
           bootstrap_bin="$(find build/bootstrap -maxdepth 1 -type f -name '*.ino.bin' -print -quit)"
           ota_bin="$(find build/ota -maxdepth 1 -type f -name '*.ino.bin' -print -quit)"
           node_hex="$(find build/node -maxdepth 1 -type f -name '*.hex' -print -quit)"

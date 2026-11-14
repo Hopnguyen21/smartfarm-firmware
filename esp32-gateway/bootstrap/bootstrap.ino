@@ -27,7 +27,7 @@ bool provisioningMode = false;
 unsigned long lastUpdatePoll = 0;
 // Backend address on the SmartFarm Wi-Fi LAN. Change only when deploying to another LAN.
 const char* BACKEND_URL = "http://192.168.1.159:5144";
-const char* BOOTSTRAP_FIRMWARE_VERSION = "1.0.16";
+const char* BOOTSTRAP_FIRMWARE_VERSION = "1.0.28";
 
 String chipId() { return String((uint32_t)ESP.getEfuseMac(), HEX); }
 
