@@ -64,21 +64,25 @@ unsigned long lastOtaPoll = 0;
 uint8_t currentNodeIndex = 0;
 bool enrollmentHandshakeVerified = false;
 
-void reportRuntimeBoot() {
+void reportOtaResult(const String& version, const char* result, const char* errorCode = nullptr, const char* errorMessage = nullptr) {
   if (WiFi.status() != WL_CONNECTED || String(FIRMWARE_VERSION) == "dev") return;
   HTTPClient http;
   if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-runtime/ota-result")) return;
   http.addHeader("Content-Type", "application/json");
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<384> doc;
   doc["macAddress"] = WiFi.macAddress();
-  doc["version"] = FIRMWARE_VERSION;
-  doc["result"] = "Succeeded";
+  doc["version"] = version;
+  doc["result"] = result;
+  if (errorCode) doc["errorCode"] = errorCode;
+  if (errorMessage) doc["errorMessage"] = errorMessage;
   String payload; serializeJson(doc, payload);
   const int status = http.POST(payload);
   http.end();
-  if (status >= 200 && status < 300) Serial.println("OTA_RESULT_REPORTED");
+  if (status >= 200 && status < 300) { Serial.print("OTA_RESULT_REPORTED "); Serial.println(result); }
   else Serial.printf("OTA_RESULT_REPORT_FAILED status=%d\n", status);
 }
+
+void reportRuntimeBoot() { reportOtaResult(String(FIRMWARE_VERSION), "Succeeded"); }
 
 bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
   if (firmwareUrl.isEmpty() || expectedSha256.length() != 64) {
@@ -133,8 +137,12 @@ void pollRuntimeUpdate() {
     if (!deserializeJson(doc, http.getString())) {
       const String firmwareUrl = doc["firmwareUrl"] | "";
       const String sha = doc["artifactSha256"] | "";
+      const String targetVersion = doc["version"] | "";
       Serial.println("OTA_JOB_RECEIVED");
-      http.end(); applyOtaUpdate(firmwareUrl, sha); return;
+      http.end();
+      reportOtaResult(targetVersion, "Started");
+      if (!applyOtaUpdate(firmwareUrl, sha)) reportOtaResult(targetVersion, "Failed", "OTA_APPLY_FAILED", "Firmware download, checksum or flash failed");
+      return;
     }
   }
   http.end();
