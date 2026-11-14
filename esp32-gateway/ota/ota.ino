@@ -182,6 +182,56 @@ void sendE32Frame(uint8_t address, const uint8_t* payload, size_t length) {
   e32Serial.flush();
   Serial.println("LORA_TX_FLUSHED");
 }
+void publishActuatorFeedback(const String& commandId, const String& deviceId, const String& nodeHardwareAddress, int relayChannel, const char* status, const char* observedState, const char* errorCode = nullptr) {
+  if (!mqtt.connected()) return;
+  StaticJsonDocument<512> doc;
+  doc["commandId"] = commandId;
+  doc["deviceId"] = deviceId;
+  doc["nodeHardwareAddress"] = nodeHardwareAddress;
+  doc["relayChannel"] = relayChannel;
+  doc["status"] = status;
+  doc["observedState"] = observedState;
+  if (errorCode) doc["errorCode"] = errorCode;
+  String payload; serializeJson(doc, payload);
+  const String topic = "smartfarm/gateways/" + config.gatewayId + "/actuator-feedback";
+  mqtt.publish(topic.c_str(), payload.c_str());
+  Serial.print("ACTUATOR_FEEDBACK "); Serial.println(payload);
+}
+void dispatchActuatorCommand(JsonDocument& command) {
+  const String commandId = command["commandId"] | "";
+  const String deviceId = command["deviceId"] | "";
+  const String hardwareAddress = command["nodeHardwareAddress"] | "";
+  const int relayChannel = command["relayChannel"] | 1;
+  const String action = command["action"] | "TurnOff";
+  const uint16_t duration = min((int)(command["durationSeconds"] | 0), 1800);
+  NodeRoute* target = nullptr;
+  for (auto& node : config.nodes) {
+    if ((!deviceId.isEmpty() && node.deviceId == deviceId) || (!hardwareAddress.isEmpty() && node.hardwareAddress == hardwareAddress)) { target = &node; break; }
+  }
+  if (!target || relayChannel < 1 || relayChannel > 8) {
+    publishActuatorFeedback(commandId, deviceId, hardwareAddress, relayChannel, "Failed", "UnknownNode", "NODE_ROUTE_NOT_FOUND");
+    return;
+  }
+  uint8_t frame[8] = {0xAA, 0x20, (uint8_t)relayChannel, (uint8_t)(action == "TurnOn" ? 1 : 0), (uint8_t)(duration >> 8), (uint8_t)duration, 0, 0};
+  const uint16_t crc = calculateCRC16(frame, 6); frame[6] = crc >> 8; frame[7] = crc & 0xFF;
+  Serial.print("LORA_ACTUATE node="); Serial.print(target->hardwareAddress); Serial.print(" relay="); Serial.println(relayChannel);
+  sendE32Frame(target->loraAddress, frame, sizeof(frame));
+  uint8_t buffer[32] = {}; uint8_t length = 0; const unsigned long start = millis();
+  while (millis() - start < NODE_REPLY_TIMEOUT_MS) {
+    while (e32Serial.available() && length < sizeof(buffer)) buffer[length++] = e32Serial.read();
+    for (uint8_t i = 0; i + 7 <= length; i++) {
+      if (buffer[i] != 0xAA || buffer[i + 1] != 0x21) continue;
+      const uint16_t expected = calculateCRC16(&buffer[i], 5);
+      const uint16_t actual = ((uint16_t)buffer[i + 5] << 8) | buffer[i + 6];
+      if (expected != actual) continue;
+      const bool on = buffer[i + 3] == 1;
+      publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, buffer[i + 4] == 0 ? "Acknowledged" : "Failed", on ? "Running" : "Off", buffer[i + 4] == 0 ? nullptr : "NODE_RELAY_FAILED");
+      return;
+    }
+    delay(5);
+  }
+  publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, "TimedOut", "Unknown", "NODE_ACK_TIMEOUT");
+}
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   Serial.print("MQTT_COMMAND topic=");
   Serial.print(topic);
@@ -192,7 +242,10 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   raw.reserve(length + 1);
   for (unsigned int i = 0; i < length; i++) raw += (char)payload[i];
   StaticJsonDocument<8192> command;
-  if (deserializeJson(command, raw) || String((const char*)(command["type"] | "")) != "CONFIG") return;
+  if (deserializeJson(command, raw)) return;
+  const String type = command["type"] | "";
+  if (type.isEmpty()) { dispatchActuatorCommand(command); return; }
+  if (type != "CONFIG") return;
   const int requestedVersion = command["configVersion"] | 0;
   if (requestedVersion <= config.configVersion) {
     Serial.printf("CONFIG_IGNORED version=%d current=%d\n", requestedVersion, config.configVersion);
