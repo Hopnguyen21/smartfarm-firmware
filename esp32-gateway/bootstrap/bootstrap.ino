@@ -25,6 +25,7 @@ String serialLine;
 WebServer provisioningServer(80);
 bool provisioningMode = false;
 unsigned long lastUpdatePoll = 0;
+unsigned long lastEnrollmentAttempt = 0;
 // Backend address on the SmartFarm Wi-Fi LAN. Change only when deploying to another LAN.
 const char* BACKEND_URL = "http://192.168.1.159:5144";
 const char* BOOTSTRAP_FIRMWARE_VERSION = "1.0.28";
@@ -72,8 +73,10 @@ void resetEnrollment() {
 
 void autoEnroll() {
   if (WiFi.status() != WL_CONNECTED) { Serial.println("ENROLLMENT_REQUIRES_WIFI"); return; }
+  Serial.println("ENROLLMENT_START source=automatic");
   HTTPClient http;
-  if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-enrollment/auto")) { Serial.println("ENROLLMENT_BACKEND_UNAVAILABLE"); return; }
+  const String endpoint = String(BACKEND_URL) + "/api/v1/gateway-enrollment/auto";
+  if (!http.begin(endpoint)) { Serial.println("ENROLLMENT_BACKEND_UNAVAILABLE"); return; }
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<384> document;
   document["macAddress"] = WiFi.macAddress();
@@ -81,19 +84,24 @@ void autoEnroll() {
   document["bootstrapFirmwareVersion"] = BOOTSTRAP_FIRMWARE_VERSION;
   String payload; serializeJson(document, payload);
   const int status = http.POST(payload);
+  const String response = http.getString();
   http.end();
   if (status >= 200 && status < 300) { preferences.putBool("enrolled", true); preferences.putBool("otaArmed", true); Serial.println("ENROLLMENT_OK"); }
-  else { Serial.print("ENROLLMENT_FAILED status="); Serial.println(status); }
+  else { Serial.print("ENROLLMENT_FAILED status="); Serial.print(status); Serial.print(" body="); Serial.println(response); }
 }
 
 bool applyRuntimeUpdate(const String& url, const String& expected, const String& version) {
+  Serial.print("OTA_DOWNLOAD_START version="); Serial.print(version); Serial.print(" url="); Serial.print(url); Serial.print(" sha256="); Serial.println(expected);
   HTTPClient http; http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); if (!http.begin(url)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN"); return false; }
   const int code = http.GET(); if (code != HTTP_CODE_OK) { http.end(); return false; }
+  Serial.print("OTA_DOWNLOAD_HEADERS status="); Serial.print(code); Serial.print(" bytes="); Serial.println(http.getSize());
   WiFiClient* stream = http.getStreamPtr(); mbedtls_sha256_context hash; mbedtls_sha256_init(&hash); mbedtls_sha256_starts(&hash, 0);
   uint8_t buffer[1024]; size_t total = 0; unsigned long last = millis();
   while (http.connected() && (millis() - last < 15000)) { size_t available = stream->available(); if (!available) { delay(10); continue; } size_t read = stream->readBytes(buffer, min(available, sizeof(buffer))); if (!read) continue; mbedtls_sha256_update(&hash, buffer, read); total += read; last = millis(); }
   uint8_t digest[32]; mbedtls_sha256_finish(&hash, digest); mbedtls_sha256_free(&hash); http.end(); String actual; for (uint8_t b : digest) { if (b < 16) actual += '0'; actual += String(b, HEX); } actual.toUpperCase();
+  Serial.print("OTA_DOWNLOAD_COMPLETE bytes="); Serial.print(total); Serial.print(" sha256="); Serial.println(actual);
   if (!actual.equalsIgnoreCase(expected) || total == 0) { Serial.println("OTA_SHA256_MISMATCH"); return false; }
+  Serial.println("OTA_SHA256_OK");
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); if (!http.begin(url) || http.GET() != HTTP_CODE_OK) { Serial.println("OTA_DOWNLOAD_FAILED:WRITE"); http.end(); return false; }
   const int contentLength = http.getSize();
   if (contentLength <= 0 || !Update.begin((size_t)contentLength)) { Serial.print("OTA_WRITE_FAILED:BEGIN error="); Serial.println(Update.errorString()); http.end(); return false; }
@@ -188,23 +196,28 @@ void connectWifi() {
   const String ssid = preferences.getString("wifiSsid", "");
   const String password = preferences.getString("wifiPassword", "");
   if (ssid.isEmpty()) { Serial.println("WIFI_CONFIG_REQUIRED"); return; }
+  WiFi.mode(WIFI_STA);
+  Serial.print("WIFI_CONNECT_START ssid="); Serial.println(ssid);
   WiFi.begin(ssid.c_str(), password.c_str());
   const unsigned long started = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - started < 20000) { delay(500); Serial.print('.'); }
   Serial.println();
-  Serial.println(WiFi.status() == WL_CONNECTED ? "WIFI_CONNECTED" : "WIFI_FAILED");
+  if (WiFi.status() == WL_CONNECTED) { Serial.print("WIFI_CONNECTED ip="); Serial.print(WiFi.localIP()); Serial.print(" mac="); Serial.println(WiFi.macAddress()); }
+  else Serial.println("WIFI_FAILED");
   if (WiFi.status() != WL_CONNECTED) Serial.println("WIFI_CONFIG_REQUIRED_OR_FAILED");
 }
 
 void setup() {
   Serial.begin(115200);
   preferences.begin("smartfarm", false);
-  Serial.println("SMARTFARM_BOOTSTRAP_READY");
+  Serial.print("SMARTFARM_BOOTSTRAP_READY version="); Serial.println(BOOTSTRAP_FIRMWARE_VERSION);
   connectWifi();
+  if (WiFi.status() == WL_CONNECTED && !preferences.getBool("enrolled", false)) autoEnroll();
 }
 
 void loop() {
   pollRuntimeUpdate();
+  if (WiFi.status() == WL_CONNECTED && !preferences.getBool("enrolled", false) && millis() - lastEnrollmentAttempt >= 10000) { lastEnrollmentAttempt = millis(); autoEnroll(); }
   if (provisioningMode) provisioningServer.handleClient();
   while (Serial.available()) {
     const char character = (char)Serial.read();
