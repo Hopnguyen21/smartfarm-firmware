@@ -39,8 +39,6 @@ static const unsigned long SENSOR_POLL_INTERVAL_MS = 8000;
 static const char* BACKEND_URL = "http://192.168.1.159:5144";
 // Temporary recovery mode: use the known-good deployment config without
 // requiring CONFIG=... to be pasted through Serial Monitor.
-static const bool USE_COMPILED_CONFIG = false;
-static const char* COMPILED_CONFIG = R"json({"gatewayId":"5aae6a76-8f81-4786-9c61-9ca8e33948dc","gatewaySerial":"GW-DEMO-001","farmId":"51ce6b77-fd85-43d5-911d-6f3469789bf7","zoneId":"0b6eb24a-38a5-47c2-ab4c-372b3489b724","mqtt":{"host":"192.168.1.159","port":1883,"clientId":"smartfarm-gateway-5aae6a768f8147869c619ca8e33948dc","fingerprint":"8EC678A33E9B10527792357E2B380B96D950631F607E883D41EA5E5B9C3BC4E6"},"nodes":[{"deviceId":"d7aaa79c-746a-4148-8339-c344971a66ec","hardwareAddress":"NODE-ZONE1-02","zoneId":"0b6eb24a-38a5-47c2-ab4c-372b3489b724","loraAddress":2,"deviceType":"SensorNode"},{"deviceId":"fdfcff82-b065-4f10-8a23-84a467f07c15","hardwareAddress":"NODE-ZONE1-01","zoneId":"0b6eb24a-38a5-47c2-ab4c-372b3489b724","loraAddress":3,"deviceType":"SensorNode"}]})json";
 struct NodeRoute { String deviceId; String hardwareAddress; uint8_t loraAddress; String deviceType; };
 struct GatewayConfig {
   String gatewayId, gatewaySerial, farmId, zoneId, mqttHost, mqttClientId, fingerprint;
@@ -324,7 +322,7 @@ bool validHex64(const String& value) {
   return true;
 }
 bool loadConfig() {
-  String raw = USE_COMPILED_CONFIG ? String(COMPILED_CONFIG) : prefs.getString("config", "");
+  String raw = prefs.getString("config", "");
   if (raw.isEmpty()) return false;
   StaticJsonDocument<8192> doc;
   if (deserializeJson(doc, raw)) return false;
