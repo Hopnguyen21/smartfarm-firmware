@@ -401,6 +401,18 @@ void connectWiFi() {
   for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) delay(250);
   Serial.println(WiFi.status() == WL_CONNECTED ? "WIFI_CONNECTED" : "WIFI_FAILED");
 }
+void fetchRuntimeConfig() {
+  if (WiFi.status() != WL_CONNECTED || !config.gatewayId.isEmpty()) return;
+  HTTPClient http;
+  String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/config?macAddress=" + WiFi.macAddress();
+  if (!http.begin(url)) { Serial.println("CONFIG_FETCH_FAILED:BEGIN"); return; }
+  int status = http.GET();
+  if (status != HTTP_CODE_OK) { Serial.printf("CONFIG_FETCH_FAILED status=%d\n", status); http.end(); return; }
+  String raw = http.getString();
+  http.end();
+  if (saveConfig(raw)) Serial.println("CONFIG_APPLIED");
+  else Serial.println("CONFIG_FETCH_FAILED:INVALID");
+}
 void connectMqtt() {
   if (WiFi.status() != WL_CONNECTED || config.mqttHost.isEmpty()) return;
   mqtt.setServer(config.mqttHost.c_str(), config.mqttPort);
@@ -499,6 +511,7 @@ void setup() {
   checkAndConfigureE32();
   if (loadConfig()) printConfigStatus(); else Serial.println("CONFIG_REQUIRED");
   connectWiFi();
+  fetchRuntimeConfig();
   if (WiFi.status() == WL_CONNECTED) {
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     Serial.println("NTP_SYNC_REQUESTED");
