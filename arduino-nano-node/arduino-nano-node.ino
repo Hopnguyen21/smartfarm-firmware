@@ -168,7 +168,7 @@ void checkSensorsInitialStatus() {
   float h = dht.readHumidity();
   float t = dht.readTemperature();
   if (isnan(h) || isnan(t)) {
-    Serial.println(F("  - Cam bien DHT (D2): [CHUA KET NOI HOAC LOI DOC] (Se dung gia tri mac dinh)"));
+    Serial.println(F("  - Cam bien DHT (D2): [CHUA KET NOI HOAC LOI DOC] (Khong co du lieu)"));
   } else {
     Serial.print(F("  - Cam bien DHT (D2): [OK] Nhiet do = "));
     Serial.print(t, 1);
@@ -221,9 +221,10 @@ void sendActuatorAck(uint8_t channel, uint8_t observedState, uint8_t status) {
   Serial.println(F("[LORA TX] Da gui phan hoi Relay Ack toi Gateway."));
 }
 // Khởi động cảm biến ban đầu
-float g_lastSoil = 0;
-float g_lastTemp = 28.5;
-float g_lastHum  = 70.0;
+// Missing readings are represented explicitly; never publish invented values.
+float g_lastSoil = NAN;
+float g_lastTemp = NAN;
+float g_lastHum  = NAN;
 unsigned long g_lastSensorReadMillis = 0;
 void updateSensorReadingsBackground() {
   if (millis() - g_lastSensorReadMillis > 2000 || g_lastSensorReadMillis == 0) {
@@ -236,6 +237,10 @@ void updateSensorReadingsBackground() {
     if (!isnan(readHum) && !isnan(readTemp)) {
       g_lastHum = readHum;
       g_lastTemp = readTemp;
+    } else {
+      g_lastHum = NAN;
+      g_lastTemp = NAN;
+      Serial.println(F("[CAM BIEN] DHT khong co du lieu"));
     }
   }
 }
@@ -244,24 +249,26 @@ void acquireSensorReadings(float &soil, float &temp, float &hum, float &ph, uint
   soil = g_lastSoil;
   temp = g_lastTemp;
   hum  = g_lastHum;
-  ph   = 6.80f;
-  bat  = 98;
+  // Nano firmware does not include a pH probe or battery gauge.
+  ph   = NAN;
+  bat  = 255; // 255 means unavailable in the wire protocol.
   Serial.print(F("[CAM BIEN] Dat: "));
-  Serial.print(soil, 1);
+  if (isnan(soil)) Serial.print(F("N/A")); else Serial.print(soil, 1);
   Serial.print(F("% | Nhiet do: "));
-  Serial.print(temp, 1);
+  if (isnan(temp)) Serial.print(F("N/A")); else Serial.print(temp, 1);
   Serial.print(F(" *C | Do am KK: "));
-  Serial.print(hum, 1);
+  if (isnan(hum)) Serial.print(F("N/A")); else Serial.print(hum, 1);
   Serial.println(F("%"));
 }
 // --- 3.9 Gửi gói Telemetry về Gateway qua LoRa ---
 void sendTelemetryResponse(float soil, float temp, float hum, float ph, uint8_t bat) {
   uint16_t soilInt = (uint16_t)(soil * 10.0f);
-  int16_t  tempInt = (int16_t)(temp * 10.0f);
-  uint16_t humInt  = (uint16_t)(hum * 10.0f);
-  uint16_t phInt   = (uint16_t)(ph * 100.0f);
+  int16_t  tempInt = isnan(temp) ? (int16_t)-32768 : (int16_t)(temp * 10.0f);
+  uint16_t humInt  = isnan(hum) ? (uint16_t)0xFFFF : (uint16_t)(hum * 10.0f);
+  uint16_t phInt   = isnan(ph) ? (uint16_t)0xFFFF : (uint16_t)(ph * 100.0f);
   // Telemetry Payload (13 bytes):
   // [0xAA] [0x11] [Bat] [Soil_H] [Soil_L] [Temp_H] [Temp_L] [Hum_H] [Hum_L] [pH_H] [pH_L] [CRC_H] [CRC_L]
+  // Missing temperature = -32768; missing humidity/pH = 0xFFFF; battery 0xFF.
   uint8_t payload[13];
   payload[0]  = 0xAA;
   payload[1]  = 0x11; // FRAME_TELEMETRY

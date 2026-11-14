@@ -508,9 +508,12 @@ void publishTelemetry(const NodeRoute& node, float soil, float temperature, floa
   }
   doc["capturedAtUtc"] = capturedAtUtc;
   JsonArray readings = doc.createNestedArray("readings");
-  JsonObject r1 = readings.createNestedObject(); r1["parameterCode"] = "SoilMoisture"; r1["value"] = soil; r1["unit"] = "%";
-  JsonObject r2 = readings.createNestedObject(); r2["parameterCode"] = "Temperature"; r2["value"] = temperature; r2["unit"] = "°C";
-  JsonObject r3 = readings.createNestedObject(); r3["parameterCode"] = "AirHumidity"; r3["value"] = humidity; r3["unit"] = "%";
+  if (!isnan(soil)) { JsonObject r = readings.createNestedObject(); r["parameterCode"] = "SoilMoisture"; r["value"] = soil; r["unit"] = "%"; }
+  if (!isnan(temperature)) { JsonObject r = readings.createNestedObject(); r["parameterCode"] = "Temperature"; r["value"] = temperature; r["unit"] = "°C"; }
+  if (!isnan(humidity)) { JsonObject r = readings.createNestedObject(); r["parameterCode"] = "AirHumidity"; r["value"] = humidity; r["unit"] = "%"; }
+  if (!isnan(ph)) { JsonObject r = readings.createNestedObject(); r["parameterCode"] = "PH"; r["value"] = ph; r["unit"] = "pH"; }
+  if (battery != 255) { JsonObject r = readings.createNestedObject(); r["parameterCode"] = "Battery"; r["value"] = battery; r["unit"] = "%"; }
+  if (readings.size() == 0) { Serial.println("TELEMETRY_SKIPPED:NO_VALID_READINGS"); return; }
   String topic = "smartfarm/gateways/" + config.gatewayId + "/telemetry";
   String payload; serializeJson(doc, payload);
   const bool published = mqtt.publish(topic.c_str(), payload.c_str());
@@ -546,9 +549,12 @@ void pollNode(const NodeRoute& node) {
       uint16_t actual = ((uint16_t)buffer[i + 11] << 8) | buffer[i + 12];
       if (expected != actual) continue;
       float soil = (((uint16_t)buffer[i + 3] << 8) | buffer[i + 4]) / 10.0f;
-      float temperature = ((int16_t)(((uint16_t)buffer[i + 5] << 8) | buffer[i + 6])) / 10.0f;
-      float humidity = (((uint16_t)buffer[i + 7] << 8) | buffer[i + 8]) / 10.0f;
-      float ph = (((uint16_t)buffer[i + 9] << 8) | buffer[i + 10]) / 100.0f;
+      const int16_t temperatureRaw = (int16_t)(((uint16_t)buffer[i + 5] << 8) | buffer[i + 6]);
+      const uint16_t humidityRaw = ((uint16_t)buffer[i + 7] << 8) | buffer[i + 8];
+      const uint16_t phRaw = ((uint16_t)buffer[i + 9] << 8) | buffer[i + 10];
+      float temperature = temperatureRaw == (int16_t)-32768 ? NAN : temperatureRaw / 10.0f;
+      float humidity = humidityRaw == 0xFFFF ? NAN : humidityRaw / 10.0f;
+      float ph = phRaw == 0xFFFF ? NAN : phRaw / 100.0f;
       Serial.print("NODE_POLL_OK id="); Serial.println(node.hardwareAddress);
       publishTelemetry(node, soil, temperature, humidity, ph, buffer[i + 2]);
       return;
