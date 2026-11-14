@@ -28,10 +28,16 @@ jobs:
       - name: Compile ESP32 bootstrap
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
+            --build-property build.cdc_on_boot=1 \
+            --build-property build.flash_mode=dio \
+            --build-property build.boot=dio \
             --output-dir build/bootstrap esp32-gateway/bootstrap
       - name: Compile ESP32 OTA runtime
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
+            --build-property build.cdc_on_boot=1 \
+            --build-property build.flash_mode=dio \
+            --build-property build.boot=dio \
             --output-dir build/ota esp32-gateway/ota
       - name: Compile Arduino Nano Node
         run: |
