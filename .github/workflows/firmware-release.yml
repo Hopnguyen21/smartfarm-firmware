@@ -30,6 +30,7 @@ jobs:
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
             --build-property build.usb_cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
+            --build-property build.flash_freq=40m \
             --build-property build.boot=dio \
             --build-property build.partitions=partitions.csv \
             --output-dir build/bootstrap esp32-gateway/bootstrap
@@ -38,6 +39,7 @@ jobs:
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
             --build-property build.usb_cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
+            --build-property build.flash_freq=40m \
             --build-property build.boot=dio \
             --build-property build.partitions=partitions.csv \
             --output-dir build/ota esp32-gateway/ota
