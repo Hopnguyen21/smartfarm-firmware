@@ -109,7 +109,9 @@ bool applyRuntimeUpdate(const String& url, const String& expected, const String&
   // Never mark an image bootable when Update detected an internal write or
   // validation error. The previous `true` value could reboot into a corrupt
   // image after printing OTA_APPLIED.
-  const bool ended = Update.end(false);
+  // The image is already fully downloaded and verified above. Commit the
+  // OTA slot so the ROM bootloader can select it after reboot.
+  const bool ended = Update.end(true);
   const bool ok = written == (size_t)contentLength && ended && Update.isFinished();
   if (!ok) { Serial.print("OTA_WRITE_FAILED:END written="); Serial.print(written); Serial.print(" expected="); Serial.print(contentLength); Serial.print(" error="); Serial.println(Update.errorString()); }
   http.end();

@@ -56,6 +56,12 @@ jobs:
           test -n "$boot_app0"
           cp "$boot_app0" build/bootstrap/boot_app0.bin
           cp "$boot_app0" build/ota/boot_app0.bin
+          for dir in build/bootstrap build/ota; do
+            test -s "$dir"/*.bootloader.bin
+            test -s "$dir"/*.partitions.bin
+            test -s "$dir/boot_app0.bin"
+            test -s "$dir"/*.ino.bin
+          done
           bootstrap_bin="$(find build/bootstrap -maxdepth 1 -type f -name '*.ino.bin' -print -quit)"
           ota_bin="$(find build/ota -maxdepth 1 -type f -name '*.ino.bin' -print -quit)"
           node_hex="$(find build/node -maxdepth 1 -type f -name '*.hex' -print -quit)"
