@@ -31,6 +31,7 @@ jobs:
             --build-property build.usb_cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
             --build-property build.boot=dio \
+            --build-property build.partitions=partitions.csv \
             --output-dir build/bootstrap esp32-gateway/bootstrap
       - name: Compile ESP32 OTA runtime
         run: |
@@ -38,6 +39,7 @@ jobs:
             --build-property build.usb_cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
             --build-property build.boot=dio \
+            --build-property build.partitions=partitions.csv \
             --output-dir build/ota esp32-gateway/ota
       - name: Compile Arduino Nano Node
         run: |
