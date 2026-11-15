@@ -565,7 +565,11 @@ void pollNode(const NodeRoute& node) {
 }
 void setup() {
   Serial.setRxBufferSize(4096);
-  Serial.begin(115200); delay(500); prefs.begin("smartfarm", false);
+  Serial.begin(115200); delay(500);
+  // Keep this marker before any peripheral/configuration work so a serial
+  // capture can distinguish a boot failure from a later Wi-Fi/MQTT hang.
+  Serial.print("RUNTIME_BOOT_ENTRY version="); Serial.println(FIRMWARE_VERSION);
+  prefs.begin("smartfarm", false);
   Serial.print("RUNTIME_STARTED version="); Serial.println(FIRMWARE_VERSION);
   pinMode(PIN_E32_M0, OUTPUT);
   pinMode(PIN_E32_M1, OUTPUT);

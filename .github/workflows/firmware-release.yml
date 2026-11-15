@@ -19,7 +19,9 @@ jobs:
         run: |
           arduino-cli config init
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32 arduino:avr
+          # Pin the ESP32 toolchain so the bootloader/app image is reproducible
+          # and matches the 3.3.12 core used to flash the gateway Bootstrap.
+          arduino-cli core install esp32:esp32@3.3.12 arduino:avr
           arduino-cli lib install PubSubClient ArduinoJson "DHT sensor library" "Adafruit Unified Sensor"
       - name: Inject release version into runtime firmware
         run: |
@@ -31,6 +33,7 @@ jobs:
             --build-property build.usb_cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
             --build-property build.flash_freq=40m \
+            --build-property build.flash_size=4MB \
             --build-property build.boot=dio \
             --build-property build.partitions=partitions.csv \
             --output-dir build/bootstrap esp32-gateway/bootstrap
@@ -40,6 +43,7 @@ jobs:
             --build-property build.usb_cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
             --build-property build.flash_freq=40m \
+            --build-property build.flash_size=4MB \
             --build-property build.boot=dio \
             --build-property build.partitions=partitions.csv \
             --output-dir build/ota esp32-gateway/ota
