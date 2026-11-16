@@ -104,17 +104,31 @@ bool applyRuntimeUpdate(const String& url, const String& expected, const String&
   Serial.println("OTA_SHA256_OK");
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); if (!http.begin(url) || http.GET() != HTTP_CODE_OK) { Serial.println("OTA_DOWNLOAD_FAILED:WRITE"); http.end(); return false; }
   const int contentLength = http.getSize();
-  if (contentLength <= 0 || !Update.begin((size_t)contentLength)) { Serial.print("OTA_WRITE_FAILED:BEGIN error="); Serial.println(Update.errorString()); http.end(); return false; }
-  size_t written = Update.writeStream(*http.getStreamPtr());
+  Serial.print("OTA_WRITE_BEGIN status=200 size="); Serial.println(contentLength);
+  const size_t updateSize = contentLength > 0 ? (size_t)contentLength : UPDATE_SIZE_UNKNOWN;
+  if (!Update.begin(updateSize)) { Serial.print("OTA_WRITE_FAILED:BEGIN error="); Serial.println(Update.errorString()); http.end(); return false; }
+  WiFiClient* writeStream = http.getStreamPtr();
+  uint8_t writeBuffer[1024]; size_t written = 0; unsigned long lastWriteData = millis();
+  while (http.connected() && (contentLength <= 0 || written < (size_t)contentLength) && millis() - lastWriteData < 15000) {
+    const int available = writeStream->available();
+    if (available <= 0) { delay(10); continue; }
+    const size_t want = contentLength > 0 ? min((size_t)sizeof(writeBuffer), (size_t)contentLength - written) : min((size_t)sizeof(writeBuffer), (size_t)available);
+    const size_t readCount = writeStream->readBytes(writeBuffer, want);
+    if (!readCount) continue;
+    const size_t accepted = Update.write(writeBuffer, readCount);
+    written += accepted; lastWriteData = millis();
+    if (accepted != readCount) break;
+  }
   // Never mark an image bootable when Update detected an internal write or
   // validation error. The previous `true` value could reboot into a corrupt
   // image after printing OTA_APPLIED.
   // The image is already fully downloaded and verified above. Commit the
   // OTA slot so the ROM bootloader can select it after reboot.
   const bool ended = Update.end(true);
-  const bool ok = written == (size_t)contentLength && ended && Update.isFinished();
+  const bool ok = written > 0 && (contentLength <= 0 || written == (size_t)contentLength) && ended && Update.isFinished();
   if (!ok) { Serial.print("OTA_WRITE_FAILED:END written="); Serial.print(written); Serial.print(" expected="); Serial.print(contentLength); Serial.print(" error="); Serial.println(Update.errorString()); }
   http.end();
+  Serial.print("OTA_WRITE_COMPLETE written="); Serial.print(written); Serial.print(" expected="); Serial.println(contentLength);
   if (ok) { preferences.putString("pendingRuntimeVersion", version); preferences.putBool("otaArmed", false); Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
   return ok;
 }

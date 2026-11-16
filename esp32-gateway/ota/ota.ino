@@ -63,6 +63,47 @@ unsigned long lastMqttAttempt = 0;
 unsigned long lastOtaPoll = 0;
 uint8_t currentNodeIndex = 0;
 bool enrollmentHandshakeVerified = false;
+static const uint8_t COMMAND_CACHE_SIZE = 16;
+String completedCommandIds[COMMAND_CACHE_SIZE];
+uint8_t completedCommandCursor = 0;
+static const uint8_t FEEDBACK_QUEUE_SIZE = 8;
+struct PendingFeedback { String topic; String payload; };
+PendingFeedback feedbackQueue[FEEDBACK_QUEUE_SIZE];
+uint8_t feedbackQueueCount = 0;
+
+bool commandWasCompleted(const String& commandId) {
+  if (commandId.isEmpty()) return false;
+  for (const auto& value : completedCommandIds) if (value == commandId) return true;
+  return false;
+}
+
+void rememberCompletedCommand(const String& commandId) {
+  if (commandId.isEmpty() || commandWasCompleted(commandId)) return;
+  completedCommandIds[completedCommandCursor] = commandId;
+  completedCommandCursor = (completedCommandCursor + 1) % COMMAND_CACHE_SIZE;
+}
+
+void enqueueFeedback(const String& topic, const String& payload) {
+  if (feedbackQueueCount >= FEEDBACK_QUEUE_SIZE) {
+    Serial.println("ACTUATOR_FEEDBACK_QUEUE_FULL");
+    return;
+  }
+  feedbackQueue[feedbackQueueCount++] = {topic, payload};
+  Serial.printf("ACTUATOR_FEEDBACK_QUEUED count=%u\n", feedbackQueueCount);
+}
+
+void flushFeedbackQueue() {
+  if (!mqtt.connected()) return;
+  while (feedbackQueueCount > 0) {
+    if (!mqtt.publish(feedbackQueue[0].topic.c_str(), feedbackQueue[0].payload.c_str())) {
+      Serial.println("ACTUATOR_FEEDBACK_RETRY_FAILED");
+      return;
+    }
+    for (uint8_t i = 1; i < feedbackQueueCount; i++) feedbackQueue[i - 1] = feedbackQueue[i];
+    feedbackQueue[--feedbackQueueCount] = {};
+    Serial.printf("ACTUATOR_FEEDBACK_RETRY_OK remaining=%u\n", feedbackQueueCount);
+  }
+}
 
 void reportOtaResult(const String& version, const char* result, const char* errorCode = nullptr, const char* errorMessage = nullptr) {
   if (WiFi.status() != WL_CONNECTED || String(FIRMWARE_VERSION) == "dev") return;
@@ -96,14 +137,14 @@ bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
   if (status != HTTP_CODE_OK) { Serial.printf("OTA_DOWNLOAD_FAILED status=%d\n", status); http.end(); return false; }
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha); mbedtls_sha256_starts(&sha, 0);
-  uint8_t buffer[1024]; size_t total = 0;
+  uint8_t buffer[1024]; size_t total = 0; unsigned long lastData = millis();
   WiFiClient* stream = http.getStreamPtr();
-  while (http.connected() && (stream->available() || total == 0)) {
+  while (http.connected() && millis() - lastData < 15000) {
     const int available = stream->available();
-    if (available <= 0) { delay(1); continue; }
+    if (available <= 0) { delay(10); continue; }
     const size_t readCount = stream->readBytes(buffer, min((int)sizeof(buffer), available));
     if (!readCount) break;
-    mbedtls_sha256_update(&sha, buffer, readCount); total += readCount;
+    mbedtls_sha256_update(&sha, buffer, readCount); total += readCount; lastData = millis();
   }
   uint8_t digest[32]; mbedtls_sha256_finish(&sha, digest); mbedtls_sha256_free(&sha); http.end();
   String actual; actual.reserve(64);
@@ -116,9 +157,24 @@ bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
   if (!http.begin(firmwareUrl)) { Serial.println("OTA_DOWNLOAD_FAILED:BEGIN_WRITE"); return false; }
   const int writeStatus = http.GET();
   const int contentLength = http.getSize();
-  if (writeStatus != HTTP_CODE_OK || contentLength <= 0 || !Update.begin((size_t)contentLength)) { Serial.printf("OTA_WRITE_FAILED status=%d size=%d error=%s\n", writeStatus, contentLength, Update.errorString()); http.end(); return false; }
-  size_t written = Update.writeStream(*http.getStreamPtr());
-  const bool ok = written == (size_t)contentLength && Update.end(true) && Update.isFinished();
+  Serial.printf("OTA_WRITE_BEGIN status=%d size=%d freeSketch=%u\n", writeStatus, contentLength, (unsigned)ESP.getFreeSketchSpace());
+  const size_t updateSize = contentLength > 0 ? (size_t)contentLength : UPDATE_SIZE_UNKNOWN;
+  if (writeStatus != HTTP_CODE_OK || !Update.begin(updateSize)) { Serial.printf("OTA_WRITE_FAILED status=%d size=%d error=%s\n", writeStatus, contentLength, Update.errorString()); http.end(); return false; }
+  Serial.printf("OTA_WRITE_SLOT_OK size=%u\n", (unsigned)updateSize);
+  WiFiClient* writeStream = http.getStreamPtr();
+  uint8_t writeBuffer[1024]; size_t written = 0; unsigned long lastWriteData = millis();
+  while (http.connected() && (contentLength <= 0 || written < (size_t)contentLength) && millis() - lastWriteData < 15000) {
+    const int available = writeStream->available();
+    if (available <= 0) { delay(10); continue; }
+    const size_t want = contentLength > 0 ? min((size_t)sizeof(writeBuffer), (size_t)contentLength - written) : min((size_t)sizeof(writeBuffer), (size_t)available);
+    const size_t readCount = writeStream->readBytes(writeBuffer, want);
+    if (!readCount) continue;
+    const size_t accepted = Update.write(writeBuffer, readCount);
+    written += accepted; lastWriteData = millis();
+    if (accepted != readCount) { Serial.println("OTA_WRITE_FAILED:SHORT_WRITE"); break; }
+  }
+  Serial.printf("OTA_WRITE_COMPLETE written=%u expected=%d\n", (unsigned)written, contentLength);
+  const bool ok = written > 0 && (contentLength <= 0 || written == (size_t)contentLength) && Update.end(true) && Update.isFinished();
   if (!ok) Serial.printf("OTA_WRITE_FAILED written=%u expected=%d error=%s\n", (unsigned)written, contentLength, Update.errorString());
   http.end();
   if (!ok) { Serial.println("OTA_WRITE_FAILED:VERIFY"); return false; }
@@ -197,46 +253,73 @@ void publishActuatorFeedback(const String& commandId, const String& deviceId, co
   doc["relayChannel"] = relayChannel;
   doc["status"] = status;
   doc["observedState"] = observedState;
+  time_t now = time(nullptr);
+  if (now > 0) {
+    struct tm utc;
+    gmtime_r(&now, &utc);
+    char timestamp[25];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    doc["occurredAtUtc"] = timestamp;
+  }
   if (errorCode) doc["errorCode"] = errorCode;
   String payload; serializeJson(doc, payload);
   const String topic = "smartfarm/gateways/" + config.gatewayId + "/actuator-feedback";
-  mqtt.publish(topic.c_str(), payload.c_str());
+  if (!mqtt.connected() || !mqtt.publish(topic.c_str(), payload.c_str())) enqueueFeedback(topic, payload);
   Serial.print("ACTUATOR_FEEDBACK "); Serial.println(payload);
 }
 void dispatchActuatorCommand(JsonDocument& command) {
   const String commandId = command["commandId"] | "";
+  if (commandWasCompleted(commandId)) {
+    Serial.print("MQTT_COMMAND_DUPLICATE commandId="); Serial.println(commandId);
+    return;
+  }
   const String deviceId = command["deviceId"] | "";
   const String hardwareAddress = command["nodeHardwareAddress"] | "";
   const int relayChannel = command["relayChannel"] | 1;
   const String action = command["action"] | "TurnOff";
   const uint16_t duration = min((int)(command["durationSeconds"] | 0), 1800);
+  const String cutoff = command["hardwareCutoffAtUtc"] | "";
+  const String currentUtc = utcNow();
+  if (!cutoff.isEmpty() && !currentUtc.isEmpty() && cutoff <= currentUtc) {
+    publishActuatorFeedback(commandId, deviceId, hardwareAddress, relayChannel, "Failed", "Unknown", "HARDWARE_CUTOFF_EXPIRED");
+    rememberCompletedCommand(commandId);
+    return;
+  }
   NodeRoute* target = nullptr;
   for (auto& node : config.nodes) {
     if ((!deviceId.isEmpty() && node.deviceId == deviceId) || (!hardwareAddress.isEmpty() && node.hardwareAddress == hardwareAddress)) { target = &node; break; }
   }
   if (!target || relayChannel < 1 || relayChannel > 8) {
     publishActuatorFeedback(commandId, deviceId, hardwareAddress, relayChannel, "Failed", "UnknownNode", "NODE_ROUTE_NOT_FOUND");
+    rememberCompletedCommand(commandId);
     return;
   }
   uint8_t frame[8] = {0xAA, 0x20, (uint8_t)relayChannel, (uint8_t)(action == "TurnOn" ? 1 : 0), (uint8_t)(duration >> 8), (uint8_t)duration, 0, 0};
   const uint16_t crc = calculateCRC16(frame, 6); frame[6] = crc >> 8; frame[7] = crc & 0xFF;
   Serial.print("LORA_ACTUATE node="); Serial.print(target->hardwareAddress); Serial.print(" relay="); Serial.println(relayChannel);
-  sendE32Frame(target->loraAddress, frame, sizeof(frame));
-  uint8_t buffer[32] = {}; uint8_t length = 0; const unsigned long start = millis();
-  while (millis() - start < NODE_REPLY_TIMEOUT_MS) {
-    while (e32Serial.available() && length < sizeof(buffer)) buffer[length++] = e32Serial.read();
-    for (uint8_t i = 0; i + 7 <= length; i++) {
-      if (buffer[i] != 0xAA || buffer[i + 1] != 0x21) continue;
-      const uint16_t expected = calculateCRC16(&buffer[i], 5);
-      const uint16_t actual = ((uint16_t)buffer[i + 5] << 8) | buffer[i + 6];
-      if (expected != actual) continue;
-      const bool on = buffer[i + 3] == 1;
-      publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, buffer[i + 4] == 0 ? "Acknowledged" : "Failed", on ? "Running" : "Off", buffer[i + 4] == 0 ? nullptr : "NODE_RELAY_FAILED");
-      return;
+  const int timeoutMs = constrain(config.responseTimeoutMs, 500, 10000);
+  const int attempts = constrain(config.retryCount, 0, 5) + 1;
+  for (int attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) Serial.printf("LORA_ACTUATE_RETRY attempt=%d/%d\n", attempt + 1, attempts);
+    sendE32Frame(target->loraAddress, frame, sizeof(frame));
+    uint8_t buffer[32] = {}; uint8_t length = 0; const unsigned long start = millis();
+    while (millis() - start < (unsigned long)timeoutMs) {
+      while (e32Serial.available() && length < sizeof(buffer)) buffer[length++] = (uint8_t)e32Serial.read();
+      for (uint8_t i = 0; i + 7 <= length; i++) {
+        if (buffer[i] != 0xAA || buffer[i + 1] != 0x21) continue;
+        const uint16_t expected = calculateCRC16(&buffer[i], 5);
+        const uint16_t actual = ((uint16_t)buffer[i + 5] << 8) | buffer[i + 6];
+        if (expected != actual) continue;
+        const bool on = buffer[i + 3] == 1;
+        publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, buffer[i + 4] == 0 ? "Acknowledged" : "Failed", on ? "Running" : "Off", buffer[i + 4] == 0 ? nullptr : "NODE_RELAY_FAILED");
+        rememberCompletedCommand(commandId);
+        return;
+      }
+      delay(5);
     }
-    delay(5);
   }
-  publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, "TimedOut", "Unknown", "NODE_ACK_TIMEOUT");
+  publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, "Failed", "Unknown", "NODE_ACK_TIMEOUT");
+  rememberCompletedCommand(commandId);
 }
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   Serial.print("MQTT_COMMAND topic=");
@@ -635,6 +718,7 @@ void loop() {
     connectMqtt();
   }
   mqtt.loop();
+  flushFeedbackQueue();
   pollRuntimeUpdate();
   const unsigned long pollIntervalMs = (unsigned long)max(1, config.pollingIntervalSeconds) * 1000UL;
   if (millis() - lastPublish > pollIntervalMs && !config.nodes.empty()) {
