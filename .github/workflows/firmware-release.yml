@@ -26,27 +26,27 @@ jobs:
       - name: Inject release version into runtime firmware
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          printf '#define SMARTFARM_FIRMWARE_VERSION "%s"\n' "$VERSION" > esp32-gateway/ota/version.h
+          printf '#define SMARTFARM_FIRMWARE_VERSION "%s"\n' "$VERSION" > ota/version.h
       - name: Compile ESP32 bootstrap
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
-            --build-property build.usb_cdc_on_boot=1 \
+            --build-property build.cdc_on_boot=0 \
             --build-property build.flash_mode=dio \
             --build-property build.flash_freq=40m \
             --build-property build.flash_size=4MB \
             --build-property build.boot=dio \
             --build-property build.partitions=partitions.csv \
-            --output-dir build/bootstrap esp32-gateway/bootstrap
+            --output-dir build/bootstrap bootstrap
       - name: Compile ESP32 OTA runtime
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
-            --build-property build.usb_cdc_on_boot=1 \
+            --build-property build.cdc_on_boot=0 \
             --build-property build.flash_mode=dio \
             --build-property build.flash_freq=40m \
             --build-property build.flash_size=4MB \
             --build-property build.boot=dio \
             --build-property build.partitions=partitions.csv \
-            --output-dir build/ota esp32-gateway/ota
+            --output-dir build/ota ota
       - name: Compile Arduino Nano Node
         run: |
           arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old \

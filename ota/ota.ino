@@ -20,6 +20,8 @@
 #include <vector>
 #include <time.h>
 #include "version.h"
+// Use the Arduino IDE USB CDC serial channel for diagnostics and commands.
+// Enable "USB CDC On Boot" in the IDE.
 #ifdef SMARTFARM_FIRMWARE_VERSION
 static const char* FIRMWARE_VERSION = SMARTFARM_FIRMWARE_VERSION;
 #else

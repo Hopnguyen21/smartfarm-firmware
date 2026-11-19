@@ -18,17 +18,21 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <Update.h>
+#include "esp_system.h"
 #include "mbedtls/sha256.h"
+// Use the Arduino IDE USB CDC serial channel for diagnostics and commands.
+// Enable "USB CDC On Boot" in the IDE.
 
 Preferences preferences;
 String serialLine;
 WebServer provisioningServer(80);
 bool provisioningMode = false;
+bool enrollmentSyncComplete = false;
 unsigned long lastUpdatePoll = 0;
 unsigned long lastEnrollmentAttempt = 0;
 // Backend address on the SmartFarm Wi-Fi LAN. Change only when deploying to another LAN.
 const char* BACKEND_URL = "http://192.168.1.159:5144";
-const char* BOOTSTRAP_FIRMWARE_VERSION = "1.0.32";
+const char* BOOTSTRAP_FIRMWARE_VERSION = "1.1.0";
 
 String chipId() { return String((uint32_t)ESP.getEfuseMac(), HEX); }
 
@@ -86,7 +90,7 @@ void autoEnroll() {
   const int status = http.POST(payload);
   const String response = http.getString();
   http.end();
-  if (status >= 200 && status < 300) { preferences.putBool("enrolled", true); preferences.putBool("otaArmed", true); Serial.println("ENROLLMENT_OK"); }
+  if (status >= 200 && status < 300) { preferences.putBool("enrolled", true); preferences.putBool("otaArmed", true); enrollmentSyncComplete = true; Serial.println("ENROLLMENT_OK"); }
   else { Serial.print("ENROLLMENT_FAILED status="); Serial.print(status); Serial.print(" body="); Serial.println(response); }
 }
 
@@ -129,7 +133,18 @@ bool applyRuntimeUpdate(const String& url, const String& expected, const String&
   if (!ok) { Serial.print("OTA_WRITE_FAILED:END written="); Serial.print(written); Serial.print(" expected="); Serial.print(contentLength); Serial.print(" error="); Serial.println(Update.errorString()); }
   http.end();
   Serial.print("OTA_WRITE_COMPLETE written="); Serial.print(written); Serial.print(" expected="); Serial.println(contentLength);
-  if (ok) { preferences.putString("pendingRuntimeVersion", version); preferences.putBool("otaArmed", false); Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); }
+  if (ok) {
+    preferences.putString("pendingRuntimeVersion", version);
+    preferences.putBool("otaArmed", false);
+    Serial.println("OTA_APPLIED");
+    Serial.println("OTA_RESTART_SCHEDULED");
+    Serial.flush();
+    delay(1000);
+    Serial.println("OTA_RESTARTING");
+    Serial.flush();
+    delay(100);
+    esp_restart();
+  }
   return ok;
 }
 
@@ -228,12 +243,15 @@ void setup() {
   preferences.begin("smartfarm", false);
   Serial.print("SMARTFARM_BOOTSTRAP_READY version="); Serial.println(BOOTSTRAP_FIRMWARE_VERSION);
   connectWifi();
-  if (WiFi.status() == WL_CONNECTED && !preferences.getBool("enrolled", false)) autoEnroll();
+  // Always reconcile enrollment with the backend after Wi-Fi is available.
+  // The local NVS flag can survive a DB reset, so gating this call on
+  // `enrolled` would leave the ESP silently enrolled against stale data.
+  if (WiFi.status() == WL_CONNECTED) autoEnroll();
 }
 
 void loop() {
   pollRuntimeUpdate();
-  if (WiFi.status() == WL_CONNECTED && !preferences.getBool("enrolled", false) && millis() - lastEnrollmentAttempt >= 10000) { lastEnrollmentAttempt = millis(); autoEnroll(); }
+  if (WiFi.status() == WL_CONNECTED && !enrollmentSyncComplete && millis() - lastEnrollmentAttempt >= 10000) { lastEnrollmentAttempt = millis(); autoEnroll(); }
   if (provisioningMode) provisioningServer.handleClient();
   while (Serial.available()) {
     const char character = (char)Serial.read();
