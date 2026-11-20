@@ -30,15 +30,15 @@ Bootstrap không chứa production MQTT credential hoặc Tenant/Farm identity. 
 git add .
 git commit -m "Prepare SmartFarm firmware release"
 git push origin main
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.1.1
+git push origin v1.1.1
 ```
 
 GitHub Actions sẽ tạo:
 
-- `smartfarm-gateway-bootstrap-v1.1.0.bin`
-- `smartfarm-gateway-ota-v1.1.0.bin`
-- `smartfarm-node-nano-v1.1.0.hex`
+- `smartfarm-gateway-bootstrap-v1.1.1.bin`
+- `smartfarm-gateway-ota-v1.1.1.bin`
+- `smartfarm-node-nano-v1.1.1.hex`
 - `SHA256SUMS.txt`
 
 Sau khi Release được tạo, GitHub Webhook sẽ import release vào SmartFarm ở trạng thái `PendingReview`. Admin kiểm tra checksum rồi mới Approved.

@@ -30,7 +30,7 @@ jobs:
       - name: Compile ESP32 bootstrap
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
-            --build-property build.cdc_on_boot=0 \
+            --build-property build.cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
             --build-property build.flash_freq=40m \
             --build-property build.flash_size=4MB \
@@ -40,7 +40,7 @@ jobs:
       - name: Compile ESP32 OTA runtime
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32c3 \
-            --build-property build.cdc_on_boot=0 \
+            --build-property build.cdc_on_boot=1 \
             --build-property build.flash_mode=dio \
             --build-property build.flash_freq=40m \
             --build-property build.flash_size=4MB \
