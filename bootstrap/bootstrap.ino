@@ -17,8 +17,10 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <WebServer.h>
+#include <PubSubClient.h>
 #include <Update.h>
 #include "esp_system.h"
+#include "esp_ota_ops.h"
 #include "mbedtls/sha256.h"
 // Use the Arduino IDE USB CDC serial channel for diagnostics and commands.
 // Enable "USB CDC On Boot" in the IDE.
@@ -30,11 +32,46 @@ bool provisioningMode = false;
 bool enrollmentSyncComplete = false;
 unsigned long lastUpdatePoll = 0;
 unsigned long lastEnrollmentAttempt = 0;
+uint8_t otaApplyFailures = 0;
+unsigned long otaRetryAfter = 0;
+unsigned long lastConfigPoll = 0;
+unsigned long lastMqttAttempt = 0;
 // Backend address on the SmartFarm Wi-Fi LAN. Change only when deploying to another LAN.
 const char* BACKEND_URL = "http://192.168.1.159:5144";
 const char* BOOTSTRAP_FIRMWARE_VERSION = "1.1.1";
 
+WiFiClient mqttWifiClient;
+PubSubClient mqtt(mqttWifiClient);
+String runtimeGatewayId, runtimeMqttHost, runtimeMqttClientId;
+uint16_t runtimeMqttPort = 1883;
+String activeOtaCommandId;
+
+String backendUrl() {
+  return preferences.getString("backendUrl", BACKEND_URL);
+}
+
 String chipId() { return String((uint32_t)ESP.getEfuseMac(), HEX); }
+
+void prepareOtaBoot() {
+  if (!preferences.getBool("otaPending", false)) return;
+  uint8_t boots = preferences.getUChar("otaBoots", 0) + 1;
+  preferences.putUChar("otaBoots", boots);
+  Serial.printf("OTA_PENDING_BOOT attempt=%u\n", boots);
+  if (boots <= 3) return;
+  const esp_partition_t* current = esp_ota_get_running_partition();
+  const esp_partition_t* previous = esp_ota_get_next_update_partition(current);
+  if (previous && esp_ota_set_boot_partition(previous) == ESP_OK) {
+    preferences.remove("otaPending"); preferences.remove("otaBoots");
+    Serial.println("OTA_ROLLBACK_RESTARTING"); delay(100); ESP.restart();
+  }
+}
+
+void confirmOtaBoot() {
+  if (!preferences.getBool("otaPending", false) || WiFi.status() != WL_CONNECTED) return;
+  preferences.remove("otaPending"); preferences.remove("otaBoots");
+  esp_ota_mark_app_valid_cancel_rollback();
+  Serial.println("OTA_BOOT_CONFIRMED");
+}
 
 void saveWifi(const String& command) {
   const int split = command.indexOf('|', 5);
@@ -79,7 +116,7 @@ void autoEnroll() {
   if (WiFi.status() != WL_CONNECTED) { Serial.println("ENROLLMENT_REQUIRES_WIFI"); return; }
   Serial.println("ENROLLMENT_START source=automatic");
   HTTPClient http;
-  const String endpoint = String(BACKEND_URL) + "/api/v1/gateway-enrollment/auto";
+  const String endpoint = backendUrl() + "/api/v1/gateway-enrollment/auto";
   if (!http.begin(endpoint)) { Serial.println("ENROLLMENT_BACKEND_UNAVAILABLE"); return; }
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<384> document;
@@ -135,6 +172,9 @@ bool applyRuntimeUpdate(const String& url, const String& expected, const String&
   Serial.print("OTA_WRITE_COMPLETE written="); Serial.print(written); Serial.print(" expected="); Serial.println(contentLength);
   if (ok) {
     preferences.putString("pendingRuntimeVersion", version);
+    preferences.putString("pendingOtaCommandId", activeOtaCommandId);
+    preferences.putBool("otaPending", true);
+    preferences.putUChar("otaBoots", 0);
     preferences.putBool("otaArmed", false);
     Serial.println("OTA_APPLIED");
     Serial.println("OTA_RESTART_SCHEDULED");
@@ -148,9 +188,68 @@ bool applyRuntimeUpdate(const String& url, const String& expected, const String&
   return ok;
 }
 
-void pollRuntimeUpdate() {
-  if (WiFi.status() != WL_CONNECTED || !preferences.getBool("enrolled", false) || !preferences.getBool("otaArmed", false) || millis() - lastUpdatePoll < 10000) return;
-  lastUpdatePoll = millis(); HTTPClient http; String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/update?macAddress=" + WiFi.macAddress() + "&currentVersion=bootstrap"; if (!http.begin(url)) return; int code = http.GET(); if (code == HTTP_CODE_OK) { StaticJsonDocument<768> doc; if (!deserializeJson(doc, http.getString())) { Serial.println("OTA_JOB_RECEIVED"); String firmwareUrl = doc["firmwareUrl"] | ""; String sha = doc["artifactSha256"] | ""; String version = doc["version"] | ""; http.end(); applyRuntimeUpdate(firmwareUrl, sha, version); return; } } http.end();
+void reportOtaResult(const String& version, const char* result, const char* errorCode = nullptr, const char* errorMessage = nullptr) {
+  if (!mqtt.connected() || runtimeGatewayId.isEmpty()) return;
+  StaticJsonDocument<384> doc;
+  doc["commandId"] = activeOtaCommandId;
+  doc["macAddress"] = WiFi.macAddress();
+  doc["version"] = version;
+  doc["result"] = result;
+  if (errorCode) doc["errorCode"] = errorCode;
+  if (errorMessage) doc["errorMessage"] = errorMessage;
+  String payload; serializeJson(doc, payload);
+  const String topic = "smartfarm/gateways/" + runtimeGatewayId + "/ota-result";
+  mqtt.publish(topic.c_str(), payload.c_str());
+}
+
+void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+  String raw; raw.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) raw += (char)payload[i];
+  StaticJsonDocument<1024> doc;
+  if (deserializeJson(doc, raw)) return;
+  if (String(doc["type"] | "") != "OTA") return;
+  const String commandId = doc["commandId"] | "";
+  const String version = doc["version"] | "";
+  const String firmwareUrl = doc["firmwareUrl"] | "";
+  const String sha = doc["artifactSha256"] | "";
+  if (commandId.isEmpty() || version.isEmpty() || firmwareUrl.isEmpty() || sha.length() != 64) return;
+  if (preferences.getString("lastOtaCommand", "") == commandId) return;
+  preferences.putString("lastOtaCommand", commandId);
+  activeOtaCommandId = commandId;
+  reportOtaResult(version, "Started");
+  if (!applyRuntimeUpdate(firmwareUrl, sha, version)) {
+    reportOtaResult(version, "Failed", "OTA_APPLY_FAILED", "Firmware download, checksum or flash failed");
+    otaApplyFailures = min<uint8_t>(otaApplyFailures + 1, 3);
+    otaRetryAfter = millis() + (otaApplyFailures == 1 ? 10000UL : otaApplyFailures == 2 ? 30000UL : 120000UL);
+  } else otaApplyFailures = 0;
+}
+
+void fetchRuntimeConfig() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  const String url = backendUrl() + "/api/v1/gateway-runtime/config?macAddress=" + WiFi.macAddress();
+  if (!http.begin(url) || http.GET() != HTTP_CODE_OK) { http.end(); return; }
+  StaticJsonDocument<4096> doc;
+  if (!deserializeJson(doc, http.getString())) {
+    runtimeGatewayId = doc["gatewayId"] | "";
+    runtimeMqttHost = doc["mqtt"]["host"] | "";
+    if (runtimeMqttHost.isEmpty()) runtimeMqttHost = doc["mqttHost"] | "";
+    runtimeMqttPort = doc["mqtt"]["port"] | 1883;
+    if (doc["mqtt"]["port"].isNull()) runtimeMqttPort = doc["mqttPort"] | 1883;
+    runtimeMqttClientId = doc["mqtt"]["clientId"] | "";
+    if (runtimeMqttClientId.isEmpty()) runtimeMqttClientId = doc["mqttClientId"] | "";
+  }
+  http.end();
+}
+
+void connectMqtt() {
+  if (WiFi.status() != WL_CONNECTED || runtimeMqttHost.isEmpty() || runtimeMqttClientId.isEmpty()) return;
+  mqtt.setServer(runtimeMqttHost.c_str(), runtimeMqttPort);
+  mqtt.setCallback(onMqttMessage);
+  if (mqtt.connect(runtimeMqttClientId.c_str())) {
+    mqtt.subscribe(("smartfarm/gateways/" + runtimeGatewayId + "/commands").c_str());
+    Serial.println("MQTT_CONNECTED");
+  } else Serial.printf("MQTT_FAILED rc=%d\n", mqtt.state());
 }
 
 String provisioningPage(const String& message = "") {
@@ -182,7 +281,7 @@ void startProvisioningPortal() {
   provisioningServer.on("/enroll", HTTP_POST, []() {
     if (WiFi.status() != WL_CONNECTED) { provisioningServer.send(409, "text/html; charset=utf-8", provisioningPage("ESP32 chưa kết nối Wi-Fi.")); return; }
     HTTPClient http;
-    if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-enrollment/auto")) { provisioningServer.send(500, "text/html; charset=utf-8", provisioningPage("Không mở được Backend.")); return; }
+    if (!http.begin(backendUrl() + "/api/v1/gateway-enrollment/auto")) { provisioningServer.send(500, "text/html; charset=utf-8", provisioningPage("Không mở được Backend.")); return; }
     http.addHeader("Content-Type", "application/json");
     StaticJsonDocument<384> document;
     document["macAddress"] = WiFi.macAddress();
@@ -241,16 +340,20 @@ void connectWifi() {
 void setup() {
   Serial.begin(115200);
   preferences.begin("smartfarm", false);
+  prepareOtaBoot();
   Serial.print("SMARTFARM_BOOTSTRAP_READY version="); Serial.println(BOOTSTRAP_FIRMWARE_VERSION);
   connectWifi();
+  confirmOtaBoot();
   // Always reconcile enrollment with the backend after Wi-Fi is available.
   // The local NVS flag can survive a DB reset, so gating this call on
   // `enrolled` would leave the ESP silently enrolled against stale data.
-  if (WiFi.status() == WL_CONNECTED) autoEnroll();
+  if (WiFi.status() == WL_CONNECTED) { autoEnroll(); fetchRuntimeConfig(); connectMqtt(); }
 }
 
 void loop() {
-  pollRuntimeUpdate();
+  if (WiFi.status() == WL_CONNECTED && millis() - lastConfigPoll >= 10000) { lastConfigPoll = millis(); fetchRuntimeConfig(); }
+  if (!mqtt.connected() && millis() - lastMqttAttempt >= 5000) { lastMqttAttempt = millis(); connectMqtt(); }
+  mqtt.loop();
   if (WiFi.status() == WL_CONNECTED && !enrollmentSyncComplete && millis() - lastEnrollmentAttempt >= 10000) { lastEnrollmentAttempt = millis(); autoEnroll(); }
   if (provisioningMode) provisioningServer.handleClient();
   while (Serial.available()) {

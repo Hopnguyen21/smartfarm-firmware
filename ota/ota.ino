@@ -19,6 +19,7 @@
 #include <mbedtls/sha256.h>
 #include <vector>
 #include <time.h>
+#include "esp_ota_ops.h"
 #include "version.h"
 // Use the Arduino IDE USB CDC serial channel for diagnostics and commands.
 // Enable "USB CDC On Boot" in the IDE.
@@ -39,9 +40,11 @@ static const int PIN_E32_M1 = 5;
 static const unsigned long NODE_REPLY_TIMEOUT_MS = 5000;
 static const unsigned long SENSOR_POLL_INTERVAL_MS = 8000;
 static const char* BACKEND_URL = "http://192.168.1.159:5144";
+Preferences prefs;
+struct NodeRoute { String deviceId; String hardwareAddress; uint8_t loraAddress; String deviceType; };
+String backendUrl() { return prefs.getString("backendUrl", BACKEND_URL); }
 // Temporary recovery mode: use the known-good deployment config without
 // requiring CONFIG=... to be pasted through Serial Monitor.
-struct NodeRoute { String deviceId; String hardwareAddress; uint8_t loraAddress; String deviceType; };
 struct GatewayConfig {
   String gatewayId, gatewaySerial, farmId, zoneId, mqttHost, mqttClientId, fingerprint;
   uint16_t mqttPort = 1883;
@@ -54,7 +57,6 @@ struct GatewayConfig {
   int retryCount = 2;
   std::vector<NodeRoute> nodes;
 };
-Preferences prefs;
 GatewayConfig config;
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -63,8 +65,11 @@ String serialLine;
 unsigned long lastPublish = 0;
 unsigned long lastMqttAttempt = 0;
 unsigned long lastOtaPoll = 0;
+uint8_t otaApplyFailures = 0;
+unsigned long otaRetryAfter = 0;
 uint8_t currentNodeIndex = 0;
 bool enrollmentHandshakeVerified = false;
+bool otaBootWasPending = false;
 static const uint8_t COMMAND_CACHE_SIZE = 16;
 String completedCommandIds[COMMAND_CACHE_SIZE];
 uint8_t completedCommandCursor = 0;
@@ -72,6 +77,22 @@ static const uint8_t FEEDBACK_QUEUE_SIZE = 8;
 struct PendingFeedback { String topic; String payload; };
 PendingFeedback feedbackQueue[FEEDBACK_QUEUE_SIZE];
 uint8_t feedbackQueueCount = 0;
+static const uint8_t ACTUATOR_QUEUE_SIZE = 8;
+struct PendingActuatorCommand {
+  String commandId, deviceId, hardwareAddress, action, cutoff;
+  int relayChannel = 1;
+  uint16_t duration = 0;
+  uint8_t loraAddress = 0;
+};
+PendingActuatorCommand actuatorQueue[ACTUATOR_QUEUE_SIZE];
+uint8_t actuatorQueueHead = 0, actuatorQueueTail = 0, actuatorQueueCount = 0;
+PendingActuatorCommand activeActuator;
+bool actuatorActive = false;
+uint8_t actuatorFrame[8] = {};
+uint8_t actuatorRx[32] = {};
+uint8_t actuatorRxLength = 0;
+uint8_t actuatorAttempt = 0;
+unsigned long actuatorWaitStarted = 0;
 
 bool commandWasCompleted(const String& commandId) {
   if (commandId.isEmpty()) return false;
@@ -107,13 +128,26 @@ void flushFeedbackQueue() {
   }
 }
 
-void reportOtaResult(const String& version, const char* result, const char* errorCode = nullptr, const char* errorMessage = nullptr) {
+void reportOtaResult(const String& version, const char* result, const char* errorCode = nullptr, const char* errorMessage = nullptr, const String& commandId = "") {
+  if (mqtt.connected() && !config.gatewayId.isEmpty()) {
+    StaticJsonDocument<384> mqttDoc;
+    mqttDoc["commandId"] = commandId.isEmpty() ? prefs.getString("pendingOtaCommandId", "") : commandId;
+    mqttDoc["macAddress"] = WiFi.macAddress();
+    mqttDoc["version"] = version;
+    mqttDoc["result"] = result;
+    if (errorCode) mqttDoc["errorCode"] = errorCode;
+    if (errorMessage) mqttDoc["errorMessage"] = errorMessage;
+    String mqttPayload; serializeJson(mqttDoc, mqttPayload);
+    const String topic = "smartfarm/gateways/" + config.gatewayId + "/ota-result";
+    if (mqtt.publish(topic.c_str(), mqttPayload.c_str())) { Serial.print("OTA_RESULT_MQTT_REPORTED "); Serial.println(result); return; }
+  }
   if (WiFi.status() != WL_CONNECTED || String(FIRMWARE_VERSION) == "dev") return;
   HTTPClient http;
-  if (!http.begin(String(BACKEND_URL) + "/api/v1/gateway-runtime/ota-result")) return;
+  if (!http.begin(backendUrl() + "/api/v1/gateway-runtime/ota-result")) return;
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<384> doc;
   doc["macAddress"] = WiFi.macAddress();
+  doc["commandId"] = commandId.isEmpty() ? prefs.getString("pendingOtaCommandId", "") : commandId;
   doc["version"] = version;
   doc["result"] = result;
   if (errorCode) doc["errorCode"] = errorCode;
@@ -125,9 +159,34 @@ void reportOtaResult(const String& version, const char* result, const char* erro
   else Serial.printf("OTA_RESULT_REPORT_FAILED status=%d\n", status);
 }
 
-void reportRuntimeBoot() { reportOtaResult(String(FIRMWARE_VERSION), "Succeeded"); }
+void reportRuntimeBoot() { if (otaBootWasPending) { reportOtaResult(String(FIRMWARE_VERSION), "Succeeded"); prefs.remove("pendingOtaCommandId"); } }
 
-bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
+void prepareOtaBoot() {
+  if (!prefs.getBool("otaPending", false)) return;
+  otaBootWasPending = true;
+  uint8_t boots = prefs.getUChar("otaBoots", 0) + 1;
+  prefs.putUChar("otaBoots", boots);
+  Serial.printf("OTA_PENDING_BOOT attempt=%u\n", boots);
+  if (boots <= 3) return;
+  const esp_partition_t* current = esp_ota_get_running_partition();
+  const esp_partition_t* previous = esp_ota_get_next_update_partition(current);
+  if (previous && esp_ota_set_boot_partition(previous) == ESP_OK) {
+    prefs.putBool("otaRollbackReport", true);
+    prefs.putString("otaRollbackVersion", prefs.getString("pendingOtaVersion", "unknown"));
+    prefs.remove("otaPending"); prefs.remove("otaBoots");
+    Serial.println("OTA_ROLLBACK_RESTARTING"); delay(100); ESP.restart();
+  }
+}
+
+void confirmOtaBoot() {
+  if (!prefs.getBool("otaPending", false) || WiFi.status() != WL_CONNECTED) return;
+  prefs.remove("otaPending"); prefs.remove("otaBoots");
+  prefs.remove("pendingOtaVersion");
+  esp_ota_mark_app_valid_cancel_rollback();
+  Serial.println("OTA_BOOT_CONFIRMED");
+}
+
+bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256, const String& commandId = "") {
   if (firmwareUrl.isEmpty() || expectedSha256.length() != 64) {
     Serial.println("OTA_REJECTED:INVALID_METADATA");
     return false;
@@ -180,31 +239,10 @@ bool applyOtaUpdate(const String& firmwareUrl, const String& expectedSha256) {
   if (!ok) Serial.printf("OTA_WRITE_FAILED written=%u expected=%d error=%s\n", (unsigned)written, contentLength, Update.errorString());
   http.end();
   if (!ok) { Serial.println("OTA_WRITE_FAILED:VERIFY"); return false; }
+  prefs.putBool("otaPending", true); prefs.putUChar("otaBoots", 0); prefs.putString("pendingOtaCommandId", commandId);
   Serial.println("OTA_APPLIED"); delay(500); ESP.restart(); return true;
 }
 
-void pollRuntimeUpdate() {
-  if (WiFi.status() != WL_CONNECTED || millis() - lastOtaPoll < 10000) return;
-  lastOtaPoll = millis();
-  HTTPClient http;
-  String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/update?macAddress=" + WiFi.macAddress() + "&currentVersion=" + FIRMWARE_VERSION;
-  if (!http.begin(url)) return;
-  const int status = http.GET();
-  if (status == HTTP_CODE_OK) {
-    StaticJsonDocument<768> doc;
-    if (!deserializeJson(doc, http.getString())) {
-      const String firmwareUrl = doc["firmwareUrl"] | "";
-      const String sha = doc["artifactSha256"] | "";
-      const String targetVersion = doc["version"] | "";
-      Serial.println("OTA_JOB_RECEIVED");
-      http.end();
-      reportOtaResult(targetVersion, "Started");
-      if (!applyOtaUpdate(firmwareUrl, sha)) reportOtaResult(targetVersion, "Failed", "OTA_APPLY_FAILED", "Firmware download, checksum or flash failed");
-      return;
-    }
-  }
-  http.end();
-}
 uint16_t calculateCRC16(const uint8_t* data, size_t length) {
   uint16_t crc = 0xFFFF;
   for (size_t i = 0; i < length; i++) {
@@ -275,53 +313,58 @@ void dispatchActuatorCommand(JsonDocument& command) {
     Serial.print("MQTT_COMMAND_DUPLICATE commandId="); Serial.println(commandId);
     return;
   }
-  const String deviceId = command["deviceId"] | "";
-  const String hardwareAddress = command["nodeHardwareAddress"] | "";
-  const int relayChannel = command["relayChannel"] | 1;
-  const String action = command["action"] | "TurnOff";
-  const uint16_t duration = min((int)(command["durationSeconds"] | 0), 1800);
-  const String cutoff = command["hardwareCutoffAtUtc"] | "";
-  const String currentUtc = utcNow();
-  if (!cutoff.isEmpty() && !currentUtc.isEmpty() && cutoff <= currentUtc) {
-    publishActuatorFeedback(commandId, deviceId, hardwareAddress, relayChannel, "Failed", "Unknown", "HARDWARE_CUTOFF_EXPIRED");
-    rememberCompletedCommand(commandId);
-    return;
-  }
-  NodeRoute* target = nullptr;
-  for (auto& node : config.nodes) {
-    if ((!deviceId.isEmpty() && node.deviceId == deviceId) || (!hardwareAddress.isEmpty() && node.hardwareAddress == hardwareAddress)) { target = &node; break; }
-  }
-  if (!target || relayChannel < 1 || relayChannel > 8) {
-    publishActuatorFeedback(commandId, deviceId, hardwareAddress, relayChannel, "Failed", "UnknownNode", "NODE_ROUTE_NOT_FOUND");
-    rememberCompletedCommand(commandId);
-    return;
-  }
-  uint8_t frame[8] = {0xAA, 0x20, (uint8_t)relayChannel, (uint8_t)(action == "TurnOn" ? 1 : 0), (uint8_t)(duration >> 8), (uint8_t)duration, 0, 0};
-  const uint16_t crc = calculateCRC16(frame, 6); frame[6] = crc >> 8; frame[7] = crc & 0xFF;
-  Serial.print("LORA_ACTUATE node="); Serial.print(target->hardwareAddress); Serial.print(" relay="); Serial.println(relayChannel);
-  const int timeoutMs = constrain(config.responseTimeoutMs, 500, 10000);
-  const int attempts = constrain(config.retryCount, 0, 5) + 1;
-  for (int attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) Serial.printf("LORA_ACTUATE_RETRY attempt=%d/%d\n", attempt + 1, attempts);
-    sendE32Frame(target->loraAddress, frame, sizeof(frame));
-    uint8_t buffer[32] = {}; uint8_t length = 0; const unsigned long start = millis();
-    while (millis() - start < (unsigned long)timeoutMs) {
-      while (e32Serial.available() && length < sizeof(buffer)) buffer[length++] = (uint8_t)e32Serial.read();
-      for (uint8_t i = 0; i + 7 <= length; i++) {
-        if (buffer[i] != 0xAA || buffer[i + 1] != 0x21) continue;
-        const uint16_t expected = calculateCRC16(&buffer[i], 5);
-        const uint16_t actual = ((uint16_t)buffer[i + 5] << 8) | buffer[i + 6];
-        if (expected != actual) continue;
-        const bool on = buffer[i + 3] == 1;
-        publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, buffer[i + 4] == 0 ? "Acknowledged" : "Failed", on ? "Running" : "Off", buffer[i + 4] == 0 ? nullptr : "NODE_RELAY_FAILED");
-        rememberCompletedCommand(commandId);
-        return;
-      }
-      delay(5);
+  if (actuatorQueueCount >= ACTUATOR_QUEUE_SIZE) { Serial.println("ACTUATOR_QUEUE_FULL"); return; }
+  PendingActuatorCommand& queued = actuatorQueue[actuatorQueueTail];
+  queued.commandId = commandId;
+  queued.deviceId = command["deviceId"] | "";
+  queued.hardwareAddress = command["nodeHardwareAddress"] | "";
+  queued.relayChannel = command["relayChannel"] | 1;
+  queued.action = command["action"] | "TurnOff";
+  queued.duration = min((int)(command["durationSeconds"] | 0), 1800);
+  queued.cutoff = command["hardwareCutoffAtUtc"] | "";
+  actuatorQueueTail = (actuatorQueueTail + 1) % ACTUATOR_QUEUE_SIZE;
+  actuatorQueueCount++;
+  Serial.printf("ACTUATOR_QUEUED id=%s count=%u\n", commandId.c_str(), actuatorQueueCount);
+}
+
+void finishActuator() { actuatorActive = false; actuatorRxLength = 0; }
+
+void processActuatorQueue() {
+  if (!actuatorActive) {
+    if (!actuatorQueueCount) return;
+    activeActuator = actuatorQueue[actuatorQueueHead];
+    actuatorQueueHead = (actuatorQueueHead + 1) % ACTUATOR_QUEUE_SIZE;
+    actuatorQueueCount--;
+    const String now = utcNow();
+    if (!activeActuator.cutoff.isEmpty() && !now.isEmpty() && activeActuator.cutoff <= now) {
+      publishActuatorFeedback(activeActuator.commandId, activeActuator.deviceId, activeActuator.hardwareAddress, activeActuator.relayChannel, "Failed", "Unknown", "HARDWARE_CUTOFF_EXPIRED");
+      rememberCompletedCommand(activeActuator.commandId); return;
     }
+    NodeRoute* target = nullptr;
+    for (auto& node : config.nodes) if ((!activeActuator.deviceId.isEmpty() && node.deviceId == activeActuator.deviceId) || (!activeActuator.hardwareAddress.isEmpty() && node.hardwareAddress == activeActuator.hardwareAddress)) { target = &node; break; }
+    if (!target || activeActuator.relayChannel < 1 || activeActuator.relayChannel > 8) {
+      publishActuatorFeedback(activeActuator.commandId, activeActuator.deviceId, activeActuator.hardwareAddress, activeActuator.relayChannel, "Failed", "UnknownNode", "NODE_ROUTE_NOT_FOUND");
+      rememberCompletedCommand(activeActuator.commandId); return;
+    }
+    activeActuator.hardwareAddress = target->hardwareAddress;
+    activeActuator.loraAddress = target->loraAddress;
+    actuatorFrame[0]=0xAA; actuatorFrame[1]=0x20; actuatorFrame[2]=activeActuator.relayChannel;
+    actuatorFrame[3]=(activeActuator.action == "TurnOn" ? 1 : 0); actuatorFrame[4]=activeActuator.duration >> 8; actuatorFrame[5]=activeActuator.duration;
+    const uint16_t crc=calculateCRC16(actuatorFrame,6); actuatorFrame[6]=crc>>8; actuatorFrame[7]=crc;
+    actuatorAttempt=0; actuatorRxLength=0; actuatorActive=true;
+    sendE32Frame(target->loraAddress, actuatorFrame, sizeof(actuatorFrame));
+    actuatorWaitStarted=millis();
   }
-  publishActuatorFeedback(commandId, target->deviceId, target->hardwareAddress, relayChannel, "Failed", "Unknown", "NODE_ACK_TIMEOUT");
-  rememberCompletedCommand(commandId);
+  while (e32Serial.available() && actuatorRxLength < sizeof(actuatorRx)) actuatorRx[actuatorRxLength++] = (uint8_t)e32Serial.read();
+  for (uint8_t i=0; i+7<=actuatorRxLength; i++) if (actuatorRx[i]==0xAA && actuatorRx[i+1]==0x21 && calculateCRC16(&actuatorRx[i],5)==(((uint16_t)actuatorRx[i+5]<<8)|actuatorRx[i+6])) {
+    const bool on=actuatorRx[i+3]==1; const bool ok=actuatorRx[i+4]==0;
+    publishActuatorFeedback(activeActuator.commandId, activeActuator.deviceId, activeActuator.hardwareAddress, activeActuator.relayChannel, ok?"Acknowledged":"Failed", on?"Running":"Off", ok?nullptr:"NODE_RELAY_FAILED");
+    rememberCompletedCommand(activeActuator.commandId); finishActuator(); return;
+  }
+  if (millis()-actuatorWaitStarted >= (unsigned long)constrain(config.responseTimeoutMs,500,10000)) {
+    if (++actuatorAttempt < constrain(config.retryCount,0,5)+1) { sendE32Frame(activeActuator.loraAddress, actuatorFrame, sizeof(actuatorFrame)); actuatorRxLength=0; actuatorWaitStarted=millis(); }
+    else { publishActuatorFeedback(activeActuator.commandId, activeActuator.deviceId, activeActuator.hardwareAddress, activeActuator.relayChannel, "Failed", "Unknown", "NODE_ACK_TIMEOUT"); rememberCompletedCommand(activeActuator.commandId); finishActuator(); }
+  }
 }
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   Serial.print("MQTT_COMMAND topic=");
@@ -336,6 +379,28 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   if (deserializeJson(command, raw)) return;
   const String type = command["type"] | "";
   if (type.isEmpty()) { dispatchActuatorCommand(command); return; }
+  if (type == "OTA") {
+    const String commandId = command["commandId"] | "";
+    const String version = command["version"] | "";
+    const String firmwareUrl = command["firmwareUrl"] | "";
+    const String sha = command["artifactSha256"] | "";
+    if (commandId.isEmpty() || version.isEmpty() || firmwareUrl.isEmpty() || sha.length() != 64) {
+      Serial.println("OTA_COMMAND_REJECTED:INVALID_METADATA");
+      return;
+    }
+    if (prefs.getString("lastOtaCommand", "") == commandId) {
+      Serial.println("OTA_COMMAND_DUPLICATE");
+      return;
+    }
+    prefs.putString("lastOtaCommand", commandId);
+    prefs.putString("pendingOtaVersion", version);
+    Serial.printf("OTA_COMMAND_ACCEPTED id=%s version=%s\n", commandId.c_str(), version.c_str());
+    reportOtaResult(version, "Started", nullptr, nullptr, commandId);
+    if (!applyOtaUpdate(firmwareUrl, sha, commandId)) {
+      reportOtaResult(version, "Failed", "OTA_APPLY_FAILED", "Firmware download, checksum or flash failed", commandId);
+    }
+    return;
+  }
   if (type != "CONFIG") return;
   const int requestedVersion = command["configVersion"] | 0;
   if (requestedVersion <= config.configVersion) {
@@ -437,10 +502,21 @@ bool loadConfig() {
   config.nodes.clear();
   for (JsonObject n : doc["nodes"].as<JsonArray>()) {
     NodeRoute route;
+    // Backend firmware-config responses may contain either camelCase JSON
+    // names or the record's CLR PascalCase names. Accept both so a valid
+    // CONFIG is never applied with an empty node registry.
     route.deviceId = n["deviceId"] | "";
+    if (route.deviceId.isEmpty()) route.deviceId = n["DeviceId"] | "";
     route.hardwareAddress = n["hardwareAddress"] | "";
-    route.loraAddress = n["loraAddress"] | 0;
+    if (route.hardwareAddress.isEmpty()) route.hardwareAddress = n["HardwareAddress"] | "";
+    // Do not chain JsonVariant fallbacks here: ArduinoJson can convert the
+    // fallback variant itself and produce an incorrect value (1 instead of
+    // 101). Select the actual present key, then convert explicitly.
+    JsonVariant lora = n["loraAddress"];
+    if (lora.isNull()) lora = n["LoraAddress"];
+    route.loraAddress = lora.isNull() ? 0 : lora.as<uint8_t>();
     route.deviceType = n["deviceType"] | "SensorNode";
+    if (route.deviceType == "SensorNode" && !n["DeviceType"].isNull()) route.deviceType = n["DeviceType"] | "SensorNode";
     if (!route.deviceId.isEmpty() && route.loraAddress > 0) config.nodes.push_back(route);
   }
   return !config.gatewayId.isEmpty() && !config.zoneId.isEmpty() && !config.mqttHost.isEmpty() &&
@@ -546,15 +622,19 @@ void connectWiFi() {
   Serial.println(WiFi.status() == WL_CONNECTED ? "WIFI_CONNECTED" : "WIFI_FAILED");
 }
 void fetchRuntimeConfig() {
-  if (WiFi.status() != WL_CONNECTED || !config.gatewayId.isEmpty()) return;
+  // Always refresh the authoritative Gateway identity before MQTT connect.
+  // The backend may have re-activated the hardware and issued a new
+  // mqttClientId; keeping an old NVS config causes MQTT CONNACK rc=5.
+  if (WiFi.status() != WL_CONNECTED) return;
+  Serial.println("CONFIG_FETCH_START");
   HTTPClient http;
-  String url = String(BACKEND_URL) + "/api/v1/gateway-runtime/config?macAddress=" + WiFi.macAddress();
+  String url = backendUrl() + "/api/v1/gateway-runtime/config?macAddress=" + WiFi.macAddress();
   if (!http.begin(url)) { Serial.println("CONFIG_FETCH_FAILED:BEGIN"); return; }
   int status = http.GET();
   if (status != HTTP_CODE_OK) { Serial.printf("CONFIG_FETCH_FAILED status=%d\n", status); http.end(); return; }
   String raw = http.getString();
   http.end();
-  if (saveConfig(raw)) Serial.println("CONFIG_APPLIED");
+  if (saveConfig(raw)) Serial.println("CONFIG_APPLIED_SOURCE=BACKEND");
   else Serial.println("CONFIG_FETCH_FAILED:INVALID");
 }
 void connectMqtt() {
@@ -655,6 +735,7 @@ void setup() {
   // capture can distinguish a boot failure from a later Wi-Fi/MQTT hang.
   Serial.print("RUNTIME_BOOT_ENTRY version="); Serial.println(FIRMWARE_VERSION);
   prefs.begin("smartfarm", false);
+  prepareOtaBoot();
   Serial.print("RUNTIME_STARTED version="); Serial.println(FIRMWARE_VERSION);
   pinMode(PIN_E32_M0, OUTPUT);
   pinMode(PIN_E32_M1, OUTPUT);
@@ -671,8 +752,15 @@ void setup() {
     Serial.println("NTP_SYNC_REQUESTED");
     verifyEnrollmentHandshake();
   }
-  reportRuntimeBoot();
   connectMqtt();
+  if (prefs.getBool("otaRollbackReport", false) && WiFi.status() == WL_CONNECTED) {
+    reportOtaResult(prefs.getString("otaRollbackVersion", "unknown"), "RolledBack", "OTA_BOOT_FAILED", "New firmware failed health-check and previous firmware was restored", prefs.getString("pendingOtaCommandId", ""));
+    prefs.remove("otaRollbackReport");
+    prefs.remove("otaRollbackVersion");
+    prefs.remove("pendingOtaCommandId");
+  }
+  confirmOtaBoot();
+  reportRuntimeBoot();
 }
 void loop() {
   if (Serial.available()) {
@@ -721,9 +809,9 @@ void loop() {
   }
   mqtt.loop();
   flushFeedbackQueue();
-  pollRuntimeUpdate();
+  processActuatorQueue();
   const unsigned long pollIntervalMs = (unsigned long)max(1, config.pollingIntervalSeconds) * 1000UL;
-  if (millis() - lastPublish > pollIntervalMs && !config.nodes.empty()) {
+  if (!actuatorActive && actuatorQueueCount == 0 && millis() - lastPublish > pollIntervalMs && !config.nodes.empty()) {
     lastPublish = millis();
     if (currentNodeIndex >= config.nodes.size()) currentNodeIndex = 0;
     pollNode(config.nodes[currentNodeIndex++]);

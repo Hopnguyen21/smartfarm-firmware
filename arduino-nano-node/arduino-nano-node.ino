@@ -37,8 +37,8 @@
 const uint8_t LORA_NETWORK_ID = 0x11;              // Khớp với Gateway Network ID!
 const uint8_t LORA_CHANNEL    = 0x1A;              // 0x1A = 436.0 MHz (Khớp với Gateway)
 // Cấu hình cố định chạy duy nhất Node 1
-const uint8_t MY_NODE_ADDRESS = 0x02;              
-const char* HARDWARE_ADDRESS  = "NODE-ZONE1-02";
+const uint8_t MY_NODE_ADDRESS = 101;              
+const char* HARDWARE_ADDRESS  = "NODE-01";
 // --- 2.2 Sơ đồ chân theo bảng đấu nối mới ---
 const int PIN_TEMP_HUMID    = 2;   // D2: Cảm biến DHT11/DHT22 DATA
 const int PIN_E32_RX        = 3;   // D3: Arduino RX (nối chân TXD của E32)
